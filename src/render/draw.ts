@@ -59,7 +59,7 @@ function drawMuteButton(ctx: CanvasRenderingContext2D, r: Rect, muted: boolean):
 function drawTitle(ctx: CanvasRenderingContext2D, l: Layout, market: MarketData, muted: boolean): void {
   const cx = l.width / 2;
   text(ctx, 'HEIBEI', cx, l.height * 0.28, l.unit * 4, FG, 'center');
-  text(ctx, '町丁の成約㎡単価を10秒で当てる', cx, l.height * 0.28 + l.unit * 3, l.unit * 1.4, DIM, 'center');
+  text(ctx, '中古マンションの成約㎡単価を10秒で当てる', cx, l.height * 0.28 + l.unit * 3, l.unit * 1.4, DIM, 'center');
   text(ctx, `全8問 ／ 対象年 ${market.sourceYear}年`, cx, l.height * 0.28 + l.unit * 5.4, l.unit * 1.4, DIM, 'center');
 
   panel(ctx, l.confirm, ACCENT);
@@ -85,7 +85,7 @@ function drawCard(ctx: CanvasRenderingContext2D, l: Layout, q: MarketGroup, mark
   y += l.unit * 2.6;
   text(ctx, q.district, px, y, l.unit * 3, FG);
   y += l.unit * 3;
-  text(ctx, `築年帯 ${q.yearBand.replace('~', '〜')} ／ ${q.structure}`, px, y, l.unit * 1.4, FG);
+  text(ctx, `中古マンション ／ ${q.yearBand.replace('~', '〜')}年築 ／ ${q.structure}`, px, y, l.unit * 1.4, FG);
   y += l.unit * 2.2;
   text(ctx, q.cityPlanning, px, y, l.unit * 1.4, FG);
   y += l.unit * 2.2;
