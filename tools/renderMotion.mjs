@@ -13,7 +13,7 @@
 //   node tools/buildAudio.mjs --out dist-video/heibei.wav
 //   node tools/renderMotion.mjs --audio dist-video/heibei.wav
 //
-// 音量は会議室で流しても刺さらない -16 LUFS に揃えます。
+// 音量は -13 LUFS。会議室のプロジェクタ程度の音量でも埋もれません。
 //
 // 素材はローカルのファイルでも、http(s) のURLでも指定できます。URLのときは
 // ダウンロード不要で、ffmpeg がそのまま読みに行きます。
@@ -270,13 +270,13 @@ if (hasAudio) {
   console.log(`音楽を重ねます: ${audio}`);
   const videoIn = hasClips ? joinedPath : bodyPath;
   // 絵は作り直さない（-c:v copy）。音だけ載せる。
-  // loudnorm は会議室で流す前提の -16 LUFS に揃えるため。
+  // loudnorm は -13 LUFS。ナレーションが無い映像なので、やや前に出して良い。
   await runFfmpeg([
     '-y',
     '-i', videoIn,
     '-i', audio,
     '-c:v', 'copy',
-    '-af', 'loudnorm=I=-16:TP=-1.5:LRA=11',
+    '-af', 'loudnorm=I=-13:TP=-1.0:LRA=9',
     '-c:a', 'aac',
     '-b:a', '192k',
     // loudnorm は内部で標本化周波数を上げる。そのまま出すと 96kHz になり、
