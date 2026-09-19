@@ -61,6 +61,13 @@ node tools/renderMotion.mjs \
 `title` / `scale` / `bands` / `cities` / `focus` / `closing` で、`--insert` は何個でも
 指定できます。`--clip-seconds` は挟む素材の先頭を何秒使うかです。
 
+素材はローカルのファイルのほか、http(s) のURLでも指定できます。手元にダウンロードしなくても、
+ffmpeg がそのまま読みに行きます。
+
+```
+node tools/renderMotion.mjs --intro "https://example.com/opening.mp4"
+```
+
 ## 技術
 
 - TypeScript / HTML5 Canvas 2D / Vite / Vitest

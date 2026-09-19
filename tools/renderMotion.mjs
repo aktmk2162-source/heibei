@@ -8,8 +8,11 @@
 //
 // 実写や生成映像を挟む場合（前後へ 0.8 秒のディゾルブで入ります）:
 //
+// 素材はローカルのファイルでも、http(s) のURLでも指定できます。URLのときは
+// ダウンロード不要で、ffmpeg がそのまま読みに行きます。
+//
 //   node tools/renderMotion.mjs \
-//     --intro opening.mp4 \              頭につなぐ
+//     --intro opening.mp4 \              頭につなぐ（URLでも可）
 //     --insert focus=street.mp4 \        focus の場面の直前に挟む
 //     --insert closing=dawn.mp4 \        closing の場面の直前に挟む
 //     --clip-seconds 4                   挟む素材はそれぞれ先頭4秒だけ使う
@@ -37,6 +40,15 @@ function arg(name, fallback) {
   return i >= 0 && process.argv[i + 1] ? process.argv[i + 1] : fallback;
 }
 
+/**
+ * 素材の指定を ffmpeg に渡せる形にする。
+ * ffmpeg は http(s) をそのまま入力にできるので、URL は絶対パス化せずに素通しする。
+ * 手元にダウンロードしなくても、生成結果のURLを直接指定できる。
+ */
+function asInput(value) {
+  return /^https?:\/\//i.test(value) ? value : resolve(value);
+}
+
 /** 同じ名前の引数をすべて集める。--insert を複数回書けるようにするため。 */
 function argAll(name) {
   const out = [];
@@ -56,7 +68,7 @@ const dissolveSec = Number(arg('dissolve', '0.8'));
 const inserts = argAll('insert').map((spec) => {
   const at = spec.indexOf('=');
   if (at <= 0) throw new Error(`--insert は 場面名=ファイル の形で書いてください: ${spec}`);
-  return { scene: spec.slice(0, at), path: resolve(spec.slice(at + 1)) };
+  return { scene: spec.slice(0, at), path: asInput(spec.slice(at + 1)) };
 });
 
 if (!(clipSec > dissolveSec)) {
@@ -168,7 +180,7 @@ await server.close();
 if (hasClips) {
   // 素材と本編の断片を順番に並べ、隣どうしをディゾルブでつなぐ。
   const segments = [];
-  if (introPath) segments.push({ kind: 'clip', path: resolve(introPath), dur: clipSec });
+  if (introPath) segments.push({ kind: 'clip', path: asInput(introPath), dur: clipSec });
 
   let prev = 0;
   for (const cut of cuts) {
