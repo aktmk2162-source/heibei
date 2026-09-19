@@ -46,6 +46,13 @@ npx playwright install chromium
 CHROMIUM_PATH=/path/to/chrome npm run motion:render
 ```
 
+頭に実写や生成映像をつなぐこともできます。画角とフレームレートは自動で揃え、本編へ0.8秒の
+ディゾルブで入ります。
+
+```
+node tools/renderMotion.mjs --intro opening.mp4 --intro-seconds 4
+```
+
 ## 技術
 
 - TypeScript / HTML5 Canvas 2D / Vite / Vitest
