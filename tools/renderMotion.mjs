@@ -8,6 +8,13 @@
 //
 // 実写や生成映像を挟む場合（前後へ 0.8 秒のディゾルブで入ります）:
 //
+// 音楽を付ける場合（tools/buildAudio.mjs で作った WAV を渡します）:
+//
+//   node tools/buildAudio.mjs --out dist-video/heibei.wav
+//   node tools/renderMotion.mjs --audio dist-video/heibei.wav
+//
+// 音量は会議室で流しても刺さらない -16 LUFS に揃えます。
+//
 // 素材はローカルのファイルでも、http(s) のURLでも指定できます。URLのときは
 // ダウンロード不要で、ffmpeg がそのまま読みに行きます。
 //
@@ -62,6 +69,7 @@ const outPath = resolve(arg('out', 'dist-video/heibei-motion.mp4'));
 const limit = Number(arg('limit', '0'));
 const crf = arg('crf', '17');
 const introPath = arg('intro', '');
+const audioPath = arg('audio', '');
 // 挟む素材の尺はこちらで切り詰める。長さが分かっていればディゾルブの位置を計算で出せる。
 const clipSec = Number(arg('clip-seconds', arg('intro-seconds', '4')));
 const dissolveSec = Number(arg('dissolve', '0.8'));
@@ -121,9 +129,25 @@ cuts.sort((a, b) => a.at - b.at);
 
 console.log(`書き出し: ${totalFrames} フレーム / ${meta.fps}fps -> ${outPath}`);
 
-// 素材を挟むときは、本編をいったん隣に書き出してから組み立てる。
+// 素材を挟む・音を付けるときは、いったん隣に書き出してから仕上げる。
 const hasClips = Boolean(introPath) || cuts.length > 0;
-const bodyPath = hasClips ? outPath.replace(/\.mp4$/, '.body.mp4') : outPath;
+const hasAudio = Boolean(audioPath);
+const bodyPath = hasClips || hasAudio ? outPath.replace(/\.mp4$/, '.body.mp4') : outPath;
+// 素材を挟んだ結果。音も付けるなら、これもまだ途中の置き場になる。
+const joinedPath = hasAudio ? outPath.replace(/\.mp4$/, '.joined.mp4') : outPath;
+
+/** ffmpeg を1回走らせる。失敗したら末尾のログを添えて投げる。 */
+function runFfmpeg(args, label) {
+  return new Promise((res, rej) => {
+    const proc = spawn(ffmpegPath, args, { stdio: ['ignore', 'ignore', 'pipe'] });
+    let err = '';
+    proc.stderr.on('data', (c) => { err += c.toString(); });
+    proc.on('close', (code) => {
+      if (code === 0) res();
+      else rej(new Error(`${label}に失敗しました (code ${code})\n${err.slice(-2000)}`));
+    });
+  });
+}
 
 const ffmpeg = spawn(ffmpegPath, [
   '-y',
@@ -224,29 +248,45 @@ if (hasClips) {
     prevLabel = out;
   }
 
-  await new Promise((res, rej) => {
-    const join = spawn(ffmpegPath, [
-      '-y',
-      ...inputs,
-      '-filter_complex', parts.join(';'),
-      '-map', `[${prevLabel}]`,
-      '-an',
-      '-c:v', 'libx264',
-      '-preset', 'slow',
-      '-crf', crf,
-      '-pix_fmt', 'yuv420p',
-      '-movflags', '+faststart',
-      outPath,
-    ], { stdio: ['ignore', 'ignore', 'pipe'] });
-    let err = '';
-    join.stderr.on('data', (c) => { err += c.toString(); });
-    join.on('close', (code) => {
-      if (code === 0) res();
-      else rej(new Error(`組み立てに失敗しました (code ${code})\n${err.slice(-2000)}`));
-    });
-  });
+  await runFfmpeg([
+    '-y',
+    ...inputs,
+    '-filter_complex', parts.join(';'),
+    '-map', `[${prevLabel}]`,
+    '-an',
+    '-c:v', 'libx264',
+    '-preset', 'slow',
+    '-crf', crf,
+    '-pix_fmt', 'yuv420p',
+    '-movflags', '+faststart',
+    joinedPath,
+  ], '組み立て');
   await rm(bodyPath, { force: true });
   console.log(`仕上がり: ${running.toFixed(1)}秒`);
+}
+
+if (hasAudio) {
+  const audio = asInput(audioPath);
+  console.log(`音楽を重ねます: ${audio}`);
+  const videoIn = hasClips ? joinedPath : bodyPath;
+  // 絵は作り直さない（-c:v copy）。音だけ載せる。
+  // loudnorm は会議室で流す前提の -16 LUFS に揃えるため。
+  await runFfmpeg([
+    '-y',
+    '-i', videoIn,
+    '-i', audio,
+    '-c:v', 'copy',
+    '-af', 'loudnorm=I=-16:TP=-1.5:LRA=11',
+    '-c:a', 'aac',
+    '-b:a', '192k',
+    // loudnorm は内部で標本化周波数を上げる。そのまま出すと 96kHz になり、
+    // 古いプレーヤーや PowerPoint で音が出ないことがあるので 48kHz に戻す。
+    '-ar', '48000',
+    '-shortest',
+    '-movflags', '+faststart',
+    outPath,
+  ], '音の重ね合わせ');
+  await rm(videoIn, { force: true });
 }
 
 console.log(`完成: ${outPath}`);

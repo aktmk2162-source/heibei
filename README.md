@@ -68,6 +68,15 @@ ffmpeg がそのまま読みに行きます。
 node tools/renderMotion.mjs --intro "https://example.com/opening.mp4"
 ```
 
+音楽も付けられます。外部の音源は使わず、場面割りに合わせて波形をその場で合成します。
+
+```
+node tools/buildAudio.mjs --out dist-video/heibei.wav
+node tools/renderMotion.mjs --audio dist-video/heibei.wav
+```
+
+和音は場面の切り替わりで動きます。音量は会議室で流す前提の -16 LUFS に揃えます。
+
 ## 技術
 
 - TypeScript / HTML5 Canvas 2D / Vite / Vitest
