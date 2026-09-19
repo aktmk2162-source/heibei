@@ -4,7 +4,7 @@
  * ここは「再生・シーク・録画」だけを持ち、絵そのものは renderFrame が決める。
  * window.heibeiMotion は書き出し（tools/renderMotion.mjs）から呼ぶための足場。
  */
-import { FPS, HEIGHT, TOTAL_FRAMES, TOTAL_SEC, WIDTH } from './scenes';
+import { FPS, HEIGHT, SCENES, TOTAL_FRAMES, TOTAL_SEC, WIDTH } from './scenes';
 import { buildMotionData } from './data';
 import { renderFrame } from './render';
 
@@ -13,6 +13,8 @@ declare global {
     heibeiMotion?: {
       totalFrames: number;
       fps: number;
+      /** 場面の名前と開始秒。書き出し側が差し込み位置を決めるのに使う。 */
+      scenes: { name: string; start: number; duration: number }[];
       /** そのフレームを描いて戻る。描画は同期で終わる。 */
       seek: (frame: number) => void;
     };
@@ -135,7 +137,12 @@ recBtn?.addEventListener('click', () => {
   requestAnimationFrame(step);
 });
 
-window.heibeiMotion = { totalFrames: TOTAL_FRAMES, fps: FPS, seek: draw };
+window.heibeiMotion = {
+  totalFrames: TOTAL_FRAMES,
+  fps: FPS,
+  scenes: SCENES.map((s) => ({ name: s.name, start: s.start, duration: s.duration })),
+  seek: draw,
+};
 
 if (scrub instanceof HTMLInputElement) scrub.max = String(TOTAL_FRAMES - 1);
 draw(0);
