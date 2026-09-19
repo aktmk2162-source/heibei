@@ -5,13 +5,26 @@
  * だからブラウザでの再生と、ヘッドレスでの書き出しが同じ絵になる。
  */
 import { ACCENT, BG, INK, INK_MUTED, INK_SUB, RULE, rampColor, withAlpha } from './palette';
-import { clamp01, easeOutCubic, easeOutExpo, fadeInOut, lerp, progress, staggered } from './ease';
+import {
+  clamp01,
+  easeInOutCubic,
+  easeOutCubic,
+  easeOutExpo,
+  fadeInOut,
+  lerp,
+  progress,
+  staggered,
+} from './ease';
 import { HEIGHT, WIDTH, frameToSec, sceneAt } from './scenes';
+import { SHARE_URL } from '../constants';
 import type { MotionData } from './data';
 
 const FONT = '"Hiragino Sans", "Noto Sans JP", "IPAGothic", "Yu Gothic", system-ui, sans-serif';
 
 const SOURCE_LINE = '出典：国土交通省 不動産情報ライブラリ（成約価格情報）';
+
+/** 末尾に出す遷移先。スキームは読み上げの邪魔なので落とす。 */
+const SHARE_LABEL = SHARE_URL.replace(/^https?:\/\//, '').replace(/\/$/, '');
 
 interface TextOpts {
   size: number;
@@ -122,6 +135,85 @@ export function formatMan(yen: number, digits = 1): string {
 /** 画面の隅に出典を小さく置く。 */
 function sourceCredit(ctx: CanvasRenderingContext2D, alpha: number): void {
   text(ctx, SOURCE_LINE, 80, HEIGHT - 52, { size: 21, color: INK_MUTED, alpha });
+}
+
+/**
+ * 夜景の灯りを描く。
+ *
+ * 点は本編の散布図と同じ 1,032 群。冒頭でばらまいた灯りが、あとで築年帯の
+ * 散布図になり、最後にまた灯りへ戻る。絵として地続きにするための仕掛け。
+ *
+ * @param settle 0 で散らばったまま、1 で中央へ寄る（散布図への前振り）
+ * @param gain   全体の明るさ。末尾では落として文字を立たせる
+ */
+function drawField(
+  ctx: CanvasRenderingContext2D,
+  t: number,
+  d: MotionData,
+  settle: number,
+  gain: number,
+): void {
+  const cy = HEIGHT / 2;
+  for (const p of d.field) {
+    // 出る順は位相から決める。データの並び順に左から出ると機械的に見える。
+    const delay = 0.1 + (p.phase / (Math.PI * 2)) * 2.0;
+    const appear = easeOutCubic(progress(t, delay, 1.1));
+    if (appear <= 0) continue;
+
+    // 手前ほど速く流れる。奥行きが出て、止まって見えなくなる。
+    const x = p.x * WIDTH + Math.sin(t * 0.3 + p.phase) * 16 * p.depth;
+    const drifted = p.y * HEIGHT - t * (5 + p.depth * 13);
+    const y = lerp(drifted, cy + (drifted - cy) * 0.5, settle);
+
+    ctx.save();
+    ctx.globalAlpha *= (0.16 + p.depth * 0.55) * appear * gain;
+    ctx.fillStyle = rampColor(clamp01(p.median / d.priceMax));
+    ctx.beginPath();
+    ctx.arc(x, y, 1.2 + p.depth * 3.2, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+  }
+}
+
+function drawOpening(ctx: CanvasRenderingContext2D, t: number, d: MotionData): void {
+  drawField(ctx, t, d, easeInOutCubic(progress(t, 3.0, 2.6)), 1);
+
+  text(ctx, `${d.totals.sourceYear}年　首都圏　中古マンション成約データ`, WIDTH / 2, HEIGHT - 150, {
+    size: 28,
+    color: INK_SUB,
+    align: 'center',
+    alpha: progress(t, 3.4, 1.0),
+  });
+  text(ctx, `${formatInt(d.totals.groups)}の町丁 × 築年帯`, WIDTH / 2, HEIGHT - 108, {
+    size: 22,
+    color: INK_MUTED,
+    align: 'center',
+    alpha: progress(t, 4.0, 1.0),
+  });
+}
+
+function drawCoda(ctx: CanvasRenderingContext2D, t: number, d: MotionData): void {
+  // 冒頭と同じ灯りへ戻す。文字を読ませたいので明るさは落とす。
+  drawField(ctx, t + 2.0, d, 0, 0.45);
+
+  const cx = WIDTH / 2;
+  const inAlpha = easeOutCubic(progress(t, 0.5, 1.0));
+  text(ctx, 'HEIBEI', cx, HEIGHT / 2 - 16, {
+    size: 68,
+    align: 'center',
+    alpha: inAlpha,
+    bold: true,
+  });
+
+  const ruleW = 360 * easeOutCubic(progress(t, 1.0, 0.9));
+  rule(ctx, cx - ruleW / 2, HEIGHT / 2 + 22, ruleW, progress(t, 1.0, 0.9), INK_SUB);
+
+  text(ctx, SHARE_LABEL, cx, HEIGHT / 2 + 76, {
+    size: 26,
+    color: INK_SUB,
+    align: 'center',
+    alpha: progress(t, 1.3, 0.9),
+  });
 }
 
 function drawTitle(ctx: CanvasRenderingContext2D, t: number, d: MotionData): void {
@@ -641,6 +733,9 @@ export function renderFrame(
   ctx.globalAlpha = Math.min(enter, exit);
 
   switch (scene.name) {
+    case 'opening':
+      drawOpening(ctx, local, data);
+      break;
     case 'title':
       drawTitle(ctx, local, data);
       break;
@@ -658,6 +753,9 @@ export function renderFrame(
       break;
     case 'closing':
       drawClosing(ctx, local, data);
+      break;
+    case 'coda':
+      drawCoda(ctx, local, data);
       break;
   }
   ctx.restore();

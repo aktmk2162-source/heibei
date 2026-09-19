@@ -72,6 +72,17 @@ export interface FocusStat {
   ratio: number;
 }
 
+/** 夜景の灯りとして散らす1点。座標は画面比 0..1。 */
+export interface FieldPoint {
+  x: number;
+  y: number;
+  /** 奥行き 0..1。大きさ・明るさ・流れる速さに効く */
+  depth: number;
+  /** ゆらぎの位相をずらすための値 */
+  phase: number;
+  median: number;
+}
+
 export interface MotionData {
   totals: Totals;
   bands: BandStat[];
@@ -80,6 +91,8 @@ export interface MotionData {
   /** ランキング条件を満たす中で最も安い区市町村 */
   cityLow: CityStat;
   focus: FocusStat;
+  /** 冒頭と末尾で散らす灯り。dots と同じ群から作る */
+  field: FieldPoint[];
   /** 縦軸の上限（円/㎡） */
   priceMax: number;
 }
@@ -116,6 +129,21 @@ function buildDots(groups: readonly MarketGroup[]): Dot[] {
   return groups.map((g) => ({
     bandIndex: BAND_ORDER.indexOf(g.yearBand),
     jitter: rng() * 2 - 1,
+    median: g.median,
+  }));
+}
+
+/**
+ * 灯りの散らばりを作る。
+ * dots とは別の種を使うが、種は固定なので毎回同じ夜景になる。
+ */
+function buildField(groups: readonly MarketGroup[]): FieldPoint[] {
+  const rng = createRng(0x59414b45);
+  return groups.map((g) => ({
+    x: rng(),
+    y: rng(),
+    depth: rng(),
+    phase: rng() * Math.PI * 2,
     median: g.median,
   }));
 }
@@ -183,6 +211,7 @@ export function buildMotionData(source: MarketData = market): MotionData {
     cities: cities.top,
     cityLow: cities.low,
     focus: buildFocus(groups),
+    field: buildField(groups),
     priceMax: 3_500_000,
   };
 }
