@@ -22,6 +22,61 @@ https://aktmk2162-source.github.io/heibei/
 
 収録データは2025年（暦年）分の成約価格情報を集計したものです。
 
+## モーショングラフィックス
+
+収録データから、相場の構造を説明する46秒の映像を生成します。ブラウザで再生・確認でき、mp4 に書き出せます。
+
+```
+npm run motion          # ブラウザで再生・シーク（webm での録画ボタン付き）
+npm run motion:render   # 1920x1080 / 30fps の mp4 を dist-video/ に書き出す
+```
+
+映像はフレーム番号だけから描いており、時計を読みません。同じデータからは何度書き出しても同じ映像になります。
+
+書き出しには次の2つが要ります。実行時の依存を増やさないため devDependencies には入れていません。
+
+```
+npm install --no-save playwright ffmpeg-static
+npx playwright install chromium
+```
+
+手元にすでに Chromium がある場合は、ダウンロードせずにそれを使えます。
+
+```
+CHROMIUM_PATH=/path/to/chrome npm run motion:render
+```
+
+実写や生成映像を挟むこともできます。画角とフレームレートは自動で揃え、前後へ0.8秒の
+ディゾルブで入ります。
+
+```
+node tools/renderMotion.mjs \
+  --intro opening.mp4 \
+  --insert focus=street.mp4 \
+  --insert closing=dawn.mp4 \
+  --clip-seconds 4
+```
+
+`--intro` は頭に、`--insert 場面名=ファイル` はその場面の直前に入ります。場面名は
+`title` / `scale` / `bands` / `cities` / `focus` / `closing` で、`--insert` は何個でも
+指定できます。`--clip-seconds` は挟む素材の先頭を何秒使うかです。
+
+素材はローカルのファイルのほか、http(s) のURLでも指定できます。手元にダウンロードしなくても、
+ffmpeg がそのまま読みに行きます。
+
+```
+node tools/renderMotion.mjs --intro "https://example.com/opening.mp4"
+```
+
+音楽も付けられます。外部の音源は使わず、場面割りに合わせて波形をその場で合成します。
+
+```
+node tools/buildAudio.mjs --out dist-video/heibei.wav
+node tools/renderMotion.mjs --audio dist-video/heibei.wav
+```
+
+和音は場面の切り替わりで動きます。音量は会議室で流す前提の -16 LUFS に揃えます。
+
 ## 技術
 
 - TypeScript / HTML5 Canvas 2D / Vite / Vitest
