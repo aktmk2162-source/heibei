@@ -16,6 +16,13 @@ npm run measure          # ランク閾値の実測（乱択との比較シミ�
 npm run motion:render    # 映像を mp4 に書き出す
 ```
 
+音楽を付けて書き出す場合:
+
+```
+node tools/buildAudio.mjs --out dist-video/heibei.wav
+node tools/renderMotion.mjs --audio dist-video/heibei.wav
+```
+
 テストを1ファイルだけ、あるいは1ケースだけ動かす:
 
 ```
@@ -90,9 +97,16 @@ CHROMIUM_PATH=/path/to/chrome npm run motion:render   # 既存の Chromium を�
 
 ### 映像
 
-`src/motion/` は `market.json` から46秒の映像を組み立てます。場面割りは `scenes.ts`、
+`src/motion/` は `market.json` から56.5秒・8場面の映像を組み立てます。場面割りは `scenes.ts`、
 集計は `data.ts`、描画は `render.ts` です。`motion/index.html` が2つ目のビルド入口になっており、
 ゲーム本編は `/`、映像は `/motion/` に出ます。
+
+冒頭（`opening`）と末尾（`coda`）は、本編の1,032群をそのまま夜景の灯りとして散らした画です。
+同じ点が `bands` で散布図になり、最後にまた灯りへ戻ります。絵を地続きにするための作りなので、
+`data.ts` の `field` と `render.ts` の `drawField` は対で見てください。
+
+音楽は `tools/buildAudio.mjs` が波形から合成します。外部の音源も音声ライブラリも使いません。
+和音は場面の切り替わりで動き、`tools/renderMotion.mjs --audio` で重ねます。
 
 映像で数字を出すときの約束:
 
@@ -112,6 +126,10 @@ CHROMIUM_PATH=/path/to/chrome npm run motion:render   # 既存の Chromium を�
   出題条件を複製しています。** 依存ゼロ・ビルド不要の素の Node で動かすためで、自動では
   同期されません。採点や出題条件を変えたら、このファイルも手で合わせてください（ファイル先頭に
   同じ注意書きがあります）。
+- **`tools/buildAudio.mjs` も `src/motion/scenes.ts` の場面割りを複製しています。** 理由は
+  `measureSkillGap.mjs` と同じ（依存ゼロの素の Node で動かすため）で、これも自動では同期されません。
+  場面の尺や並びを変えたら、このファイルの `SCENES` も手で合わせてください。ずれると音と画の
+  変わり目が合わなくなりますが、エラーにはならないので気づきにくいです。
 - **`noUncheckedIndexedAccess` が有効です。** 配列の添字アクセスは `T | undefined` を返すので、
   必ず絞り込んでから使ってください。
 - **`@types/node` を入れていません。** Node の組み込みモジュールが要る場合は
