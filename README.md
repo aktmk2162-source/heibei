@@ -22,6 +22,30 @@ https://aktmk2162-source.github.io/heibei/
 
 収録データは2025年（暦年）分の成約価格情報を集計したものです。
 
+## モーショングラフィックス
+
+収録データから、相場の構造を説明する46秒の映像を生成します。ブラウザで再生・確認でき、mp4 に書き出せます。
+
+```
+npm run motion          # ブラウザで再生・シーク（webm での録画ボタン付き）
+npm run motion:render   # 1920x1080 / 30fps の mp4 を dist-video/ に書き出す
+```
+
+映像はフレーム番号だけから描いており、時計を読みません。同じデータからは何度書き出しても同じ映像になります。
+
+書き出しには次の2つが要ります。実行時の依存を増やさないため devDependencies には入れていません。
+
+```
+npm install --no-save playwright ffmpeg-static
+npx playwright install chromium
+```
+
+手元にすでに Chromium がある場合は、ダウンロードせずにそれを使えます。
+
+```
+CHROMIUM_PATH=/path/to/chrome npm run motion:render
+```
+
 ## 技術
 
 - TypeScript / HTML5 Canvas 2D / Vite / Vitest
