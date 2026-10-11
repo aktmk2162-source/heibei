@@ -1,9 +1,12 @@
 // チャット（1対1・グループ）。画面側が数秒おきに新着を取得する方式。
+import { stat } from 'node:fs/promises';
 import { tx } from '../db.mjs';
+import { DOCUMENT_EXT, IMAGE_TYPES, cleanFilename, ext } from '../files.mjs';
 import { fail } from '../http.mjs';
 import { ids, int, str } from '../validate.mjs';
 
 const PAGE = 100;
+const ATTACH_EXT = new Set([...DOCUMENT_EXT, ...Object.keys(IMAGE_TYPES), 'heic']);
 
 export function chatUnreadCount(db, userId) {
   return db
@@ -36,23 +39,64 @@ function activeUsers(db, userIds) {
   }
 }
 
-const MSG_SQL = `SELECT m.id, m.user_id, m.body, m.created_at, u.name user_name
-                   FROM chat_messages m LEFT JOIN users u ON u.id = m.user_id`;
+const MSG_SQL = `SELECT m.id, m.user_id, m.body, m.created_at, u.name user_name,
+                          f.id file_id, f.original_name file_name, f.size file_size
+                   FROM chat_messages m LEFT JOIN users u ON u.id = m.user_id
+                   LEFT JOIN chat_files f ON f.message_id = m.id`;
 
-export function register(r) {
+function messageOut(m) {
+  const { file_id, file_name, file_size, ...rest } = m;
+  return {
+    ...rest,
+    file: file_id ? { id: file_id, name: file_name, size: file_size, is_image: !!IMAGE_TYPES[ext(file_name)] } : null,
+  };
+}
+
+async function removeRoomFiles(db, store, roomId) {
+  const files = db
+    .prepare('SELECT f.stored_name FROM chat_files f JOIN chat_messages m ON m.id = f.message_id WHERE m.room_id = ?')
+    .all(roomId);
+  return () => Promise.all(files.map((f) => store.remove(f.stored_name)));
+}
+
+export function register(r, { store, pusher } = {}) {
+  // 送信者と通知オフの人を除くメンバーへプッシュ通知する（応答は待たない）
+  function notify(db, roomId, sender, text) {
+    if (!pusher) return;
+    const room = db.prepare('SELECT * FROM chat_rooms WHERE id = ?').get(roomId);
+    const to = db
+      .prepare(
+        `SELECT cm.user_id FROM chat_members cm JOIN users u ON u.id = cm.user_id
+          WHERE cm.room_id = ? AND cm.user_id != ? AND cm.muted = 0 AND u.active = 1`,
+      )
+      .all(roomId, sender.id)
+      .map((x) => x.user_id);
+    const body = text.length > 120 ? `${text.slice(0, 120)}…` : text;
+    pusher
+      .sendToUsers(to, {
+        title: room.is_direct ? sender.name : `${room.name}（${sender.name}）`,
+        body,
+        url: `/#/chat/${roomId}`,
+        tag: `chat-${roomId}`,
+      })
+      .catch(() => {});
+  }
+
   r.add('GET', '/api/chat/rooms', (c) =>
     c.db
       .prepare(
         `SELECT r.id, r.name, r.is_direct,
                 (SELECT u.name FROM chat_members o JOIN users u ON u.id = o.user_id
                   WHERE o.room_id = r.id AND o.user_id != ? LIMIT 1) other_name,
-                (SELECT COUNT(*) FROM chat_members o WHERE o.room_id = r.id) member_count,
-                lm.body last_body, lm.created_at last_at, COALESCE(lm.id, 0) last_id,
+                (SELECT COUNT(*) FROM chat_members o WHERE o.room_id = r.id) member_count, cm.muted,
+                CASE WHEN lm.body = '' AND lf.id IS NOT NULL THEN '📎 ' || lf.original_name ELSE lm.body END last_body,
+                lm.created_at last_at, COALESCE(lm.id, 0) last_id,
                 (SELECT COUNT(*) FROM chat_messages m WHERE m.room_id = r.id AND m.id > cm.last_read_id
                     AND (m.user_id IS NULL OR m.user_id != ?)) unread
            FROM chat_rooms r
            JOIN chat_members cm ON cm.room_id = r.id AND cm.user_id = ?
            LEFT JOIN chat_messages lm ON lm.id = (SELECT MAX(id) FROM chat_messages WHERE room_id = r.id)
+           LEFT JOIN chat_files lf ON lf.message_id = lm.id
           ORDER BY COALESCE(lm.id, 0) DESC, r.id DESC`,
       )
       .all(c.user.id, c.user.id, c.user.id)
@@ -61,6 +105,7 @@ export function register(r) {
         is_direct: !!x.is_direct,
         name: x.is_direct ? x.other_name || '（退職者等）' : x.name,
         member_count: x.member_count,
+        muted: !!x.muted,
         last_body: x.last_body,
         last_at: x.last_at,
         unread: x.unread,
@@ -106,8 +151,10 @@ export function register(r) {
     const id = int(c.params.id, 'ID', { required: true });
     const room = membership(c.db, id, c.user.id);
     const members = roomMembers(c.db, id);
+    const { muted } = c.db.prepare('SELECT muted FROM chat_members WHERE room_id = ? AND user_id = ?').get(id, c.user.id);
     return {
       id,
+      muted: !!muted,
       is_direct: !!room.is_direct,
       name: room.is_direct ? members.find((m) => m.id !== c.user.id)?.name || '（退職者等）' : room.name,
       members,
@@ -132,12 +179,23 @@ export function register(r) {
     return { ok: true };
   });
 
-  r.add('POST', '/api/chat/rooms/:id/leave', (c) => {
+  r.add('PUT', '/api/chat/rooms/:id/mute', (c) => {
+    const id = int(c.params.id, 'ID', { required: true });
+    membership(c.db, id, c.user.id);
+    c.db.prepare('UPDATE chat_members SET muted = ? WHERE room_id = ? AND user_id = ?').run(c.body.muted ? 1 : 0, id, c.user.id);
+    return { muted: !!c.body.muted };
+  });
+
+  r.add('POST', '/api/chat/rooms/:id/leave', async (c) => {
     const id = int(c.params.id, 'ID', { required: true });
     membership(c.db, id, c.user.id);
     c.db.prepare('DELETE FROM chat_members WHERE room_id = ? AND user_id = ?').run(id, c.user.id);
-    // 誰もいなくなったグループは削除
-    if (!c.db.prepare('SELECT 1 FROM chat_members WHERE room_id = ?').get(id)) c.db.prepare('DELETE FROM chat_rooms WHERE id = ?').run(id);
+    // 誰もいなくなったグループは添付ファイルごと削除
+    if (!c.db.prepare('SELECT 1 FROM chat_members WHERE room_id = ?').get(id)) {
+      const cleanup = await removeRoomFiles(c.db, store, id);
+      c.db.prepare('DELETE FROM chat_rooms WHERE id = ?').run(id);
+      await cleanup();
+    }
     return { ok: true };
   });
 
@@ -149,12 +207,13 @@ export function register(r) {
     const before = int(c.query.get('before'), 'before', { min: 1 });
     let rows;
     if (after !== null) {
-      rows = c.db.prepare(`${MSG_SQL} WHERE m.room_id = ? AND m.id > ? ORDER BY m.id LIMIT ${PAGE}`).all(id, after);
+      rows = c.db.prepare(`${MSG_SQL} WHERE m.room_id = ? AND m.id > ? ORDER BY m.id LIMIT ${PAGE}`).all(id, after).map(messageOut);
     } else {
       rows = c.db
         .prepare(`${MSG_SQL} WHERE m.room_id = ? AND m.id < ? ORDER BY m.id DESC LIMIT ${PAGE}`)
         .all(id, before ?? Number.MAX_SAFE_INTEGER)
-        .reverse();
+        .reverse()
+        .map(messageOut);
     }
     const maxId = rows.length ? rows[rows.length - 1].id : 0;
     if (maxId) {
@@ -174,14 +233,66 @@ export function register(r) {
       .run(id, c.user.id, body);
     const mid = Number(lastInsertRowid);
     c.db.prepare('UPDATE chat_members SET last_read_id = ? WHERE room_id = ? AND user_id = ?').run(mid, id, c.user.id);
+    notify(c.db, id, c.user, body);
     return { id: mid };
   });
 
-  r.add('DELETE', '/api/chat/messages/:id', (c) => {
+  // ファイル添付（1ファイル＝1メッセージ）。?name=ファイル名&body=ひとこと
+  r.add(
+    'POST',
+    '/api/chat/rooms/:id/files',
+    async (c) => {
+      const id = int(c.params.id, 'ID', { required: true });
+      membership(c.db, id, c.user.id);
+      const name = cleanFilename(c.query.get('name'), ATTACH_EXT);
+      const body = str(c.query.get('body'), 'メッセージ', { max: 2000 });
+      const saved = await store.receive(c.req);
+      let mid;
+      try {
+        mid = tx(c.db, () => {
+          const m = Number(c.db.prepare('INSERT INTO chat_messages (room_id, user_id, body) VALUES (?, ?, ?)').run(id, c.user.id, body).lastInsertRowid);
+          c.db
+            .prepare('INSERT INTO chat_files (message_id, original_name, stored_name, size) VALUES (?, ?, ?, ?)')
+            .run(m, name, saved.stored, saved.size);
+          c.db.prepare('UPDATE chat_members SET last_read_id = ? WHERE room_id = ? AND user_id = ?').run(m, id, c.user.id);
+          return m;
+        });
+      } catch (err) {
+        await store.remove(saved.stored);
+        throw err;
+      }
+      notify(c.db, id, c.user, body ? `📎 ${name}\n${body}` : `📎 ${name}`);
+      return { id: mid };
+    },
+    { raw: true },
+  );
+
+  // 添付の取得（メンバーのみ）。画像は画面内表示用にそのまま、それ以外はダウンロードとして返す。
+  r.add('GET', '/api/chat/files/:id', async (c) => {
+    const id = int(c.params.id, 'ID', { required: true });
+    const f = c.db
+      .prepare('SELECT f.*, m.room_id FROM chat_files f JOIN chat_messages m ON m.id = f.message_id WHERE f.id = ?')
+      .get(id);
+    if (!f) fail(404, 'ファイルが見つかりません');
+    membership(c.db, f.room_id, c.user.id);
+    const path = store.path(f.stored_name);
+    try {
+      await stat(path);
+    } catch {
+      fail(404, 'ファイル本体が見つかりません');
+    }
+    const imageType = IMAGE_TYPES[ext(f.original_name)];
+    const inline = imageType && c.query.get('download') !== '1';
+    return { file: path, size: f.size, filename: f.original_name, inlineType: inline ? imageType : null };
+  });
+
+  r.add('DELETE', '/api/chat/messages/:id', async (c) => {
     const id = int(c.params.id, 'ID', { required: true });
     const m = c.db.prepare('SELECT * FROM chat_messages WHERE id = ?').get(id);
     if (!m || m.user_id !== c.user.id) fail(404, 'メッセージが見つかりません');
+    const f = c.db.prepare('SELECT stored_name FROM chat_files WHERE message_id = ?').get(id);
     c.db.prepare('DELETE FROM chat_messages WHERE id = ?').run(id);
+    if (f) await store.remove(f.stored_name);
     return { ok: true };
   });
 }

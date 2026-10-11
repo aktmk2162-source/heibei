@@ -26,6 +26,8 @@ const handle = createApp(db, {
   trustProxy: env.TRUST_PROXY === '1',
   filesDir: env.FILES_DIR || join(dirname(dbFile), 'files'),
   maxUploadMb: Number(env.MAX_UPLOAD_MB || 50),
+  push: env.PUSH !== '0',
+  pushSubject: env.PUSH_CONTACT || 'mailto:admin@example.com',
 });
 
 purgeExpiredSessions(db);

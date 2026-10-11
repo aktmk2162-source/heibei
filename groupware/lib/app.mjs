@@ -8,6 +8,9 @@ import * as boardApi from './api/board.mjs';
 import * as chatApi from './api/chat.mjs';
 import * as eventsApi from './api/events.mjs';
 import * as pollsApi from './api/polls.mjs';
+import * as pushApi from './api/push.mjs';
+import { FileStore } from './files.mjs';
+import { Pusher } from './push.mjs';
 import * as templatesApi from './api/templates.mjs';
 import * as usersApi from './api/users.mjs';
 import * as workflowApi from './api/workflow.mjs';
@@ -25,7 +28,10 @@ export function bootstrapAdmin(db, { loginId = 'admin', password } = {}) {
   return { loginId, password: pw };
 }
 
-export function createApp(db, { secureCookie = false, trustProxy = false, filesDir, maxUploadMb = 50, log = console } = {}) {
+export function createApp(
+  db,
+  { secureCookie = false, trustProxy = false, filesDir, maxUploadMb = 50, push = true, pushSubject, pushFetch, log = console } = {},
+) {
   const router = new Router();
   const limiter = new LoginLimiter();
   usersApi.register(router, { limiter, secureCookie });
@@ -33,9 +39,12 @@ export function createApp(db, { secureCookie = false, trustProxy = false, filesD
   workflowApi.register(router);
   boardApi.register(router);
   blogApi.register(router);
-  chatApi.register(router);
+  const store = new FileStore(filesDir, maxUploadMb * 1024 * 1024);
+  const pusher = push ? new Pusher(db, { subject: pushSubject, fetchImpl: pushFetch, log }) : null;
+  chatApi.register(router, { store, pusher });
   pollsApi.register(router);
-  templatesApi.register(router, { filesDir, maxUploadBytes: maxUploadMb * 1024 * 1024 });
+  templatesApi.register(router, { store });
+  pushApi.register(router, { pusher });
 
   const auditStmt = db.prepare('INSERT INTO audit_log (user_id, action, target) VALUES (?, ?, ?)');
 
@@ -92,12 +101,14 @@ export function createApp(db, { secureCookie = false, trustProxy = false, filesD
       }
       if (result && result.file) {
         // ダウンロードは常に添付扱い・汎用の型で返し、ブラウザ内で開かせない（XSS 対策）
+        // 画像（png/jpeg/gif/webp）のみ画面内表示を許可し、sandbox で実行能力を与えない
         res.writeHead(200, {
           ...SECURITY_HEADERS,
-          'Content-Type': 'application/octet-stream',
+          'Content-Type': result.inlineType || 'application/octet-stream',
           'Content-Length': result.size,
-          'Content-Disposition': contentDisposition(result.filename),
-          'Cache-Control': 'private, no-store',
+          'Content-Disposition': result.inlineType ? contentDisposition(result.filename).replace(/^attachment/, 'inline') : contentDisposition(result.filename),
+          'Cache-Control': 'private, max-age=0',
+          ...(result.inlineType ? { 'Content-Security-Policy': "default-src 'none'; sandbox" } : {}),
         });
         createReadStream(result.file)
           .on('error', (e) => {

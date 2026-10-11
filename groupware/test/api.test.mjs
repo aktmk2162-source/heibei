@@ -1,16 +1,25 @@
 import assert from 'node:assert/strict';
+import { createDecipheriv, createECDH, createHmac, randomBytes } from 'node:crypto';
 import { mkdtempSync, readdirSync, rmSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, before, describe, test } from 'node:test';
 import { bootstrapAdmin, createApp } from '../lib/app.mjs';
+import { encryptPayload } from '../lib/push.mjs';
 import { openDb } from '../lib/db.mjs';
 
 let server;
 let base;
 let db;
 let filesDir;
+// プッシュサービスの代わりに送信内容を記録する
+const pushed = [];
+let pushStatus = 201;
+const fakePush = async (url, init) => {
+  pushed.push({ url, init });
+  return new Response(null, { status: pushStatus });
+};
 
 // Cookie と CSRF トークンを保持する簡易クライアント
 class Client {
@@ -57,7 +66,7 @@ before(async () => {
   assert.ok(boot);
   assert.equal(bootstrapAdmin(db), null, '2回目は作成しない');
   filesDir = mkdtempSync(join(tmpdir(), 'gw-files-'));
-  server = createServer(createApp(db, { filesDir, maxUploadMb: 1, log: { error: () => {} } }));
+  server = createServer(createApp(db, { filesDir, maxUploadMb: 1, pushFetch: fakePush, log: { error: () => {} } }));
   await new Promise((r) => server.listen(0, '127.0.0.1', r));
   base = `http://127.0.0.1:${server.address().port}`;
   admin = await activate(new Client(), 'admin', 'Initial-Pass1');
@@ -508,5 +517,127 @@ describe('テンプレート集', () => {
     assert.equal((await ids.satoClient.req('DELETE', `/api/templates/${ids.tpl}`)).status, 403);
     assert.equal((await admin.req('DELETE', `/api/templates/${ids.tpl}`)).status, 200, '管理者は削除できる');
     assert.equal(readdirSync(filesDir).length, 0);
+  });
+});
+
+describe('チャットの添付と通知', () => {
+  test('暗号化が RFC 8291 付録 A の検証用ベクタと一致する', () => {
+    const b = (s) => Buffer.from(s, 'base64url');
+    const out = encryptPayload(
+      b('V2hlbiBJIGdyb3cgdXAsIEkgd2FudCB0byBiZSBhIHdhdGVybWVsb24'),
+      'BCVxsr7N_eNgVRqvHtD0zTZsEc6-VV-JvLexhqUzORcxaOzi6-AYWXvTBHm4bjyPjs7Vd8pZGH6SRpkNtoIAiw4',
+      'BTBZMqHH6r4Tts7J_aSIgg',
+      { asPrivate: b('yfWPiYE-n46HLnH0KqZOF1fJJU3MYrct3AELtAQ-oRw'), salt: b('DGv6ra1nlYgDCS1FRnbzlw') },
+    );
+    assert.equal(
+      out.toString('base64url'),
+      'DGv6ra1nlYgDCS1FRnbzlwAAEABBBP4z9KsN6nGRTbVYI_c7VJSPQTBtkgcy27mlmlMoZIIgDll6e3vCYLocInmYWAmS6TlzAC8wEqKK6PBru3jl7A_yl95bQpu6cVPTpK4Mqgkf1CXztLVBSt2Ks3oZwbuwXPXLWyouBWLVWGNWQexSgSxsj_Qulcy4a-fN',
+    );
+  });
+
+  const ua = createECDH('prime256v1');
+  ua.generateKeys();
+  const authSecret = randomBytes(16);
+  const endpoint = 'https://fcm.googleapis.com/fcm/send/test-device-sato';
+
+  // ブラウザ側の復号（RFC 8291）を再現して、暗号化が正しいことを確かめる
+  function decrypt(body) {
+    const salt = body.subarray(0, 16);
+    const idlen = body[20];
+    const asPublic = body.subarray(21, 21 + idlen);
+    const ct = body.subarray(21 + idlen);
+    const hm = (k, d) => createHmac('sha256', k).update(d).digest();
+    const shared = ua.computeSecret(asPublic);
+    const ikm = hm(hm(authSecret, shared), Buffer.concat([Buffer.from('WebPush: info\0'), ua.getPublicKey(), asPublic, Buffer.from([1])]));
+    const prk = hm(salt, ikm);
+    const cek = hm(prk, Buffer.from('Content-Encoding: aes128gcm\0\x01')).subarray(0, 16);
+    const nonce = hm(prk, Buffer.from('Content-Encoding: nonce\0\x01')).subarray(0, 12);
+    const d = createDecipheriv('aes-128-gcm', cek, nonce);
+    d.setAuthTag(ct.subarray(ct.length - 16));
+    const plain = Buffer.concat([d.update(ct.subarray(0, ct.length - 16)), d.final()]);
+    assert.equal(plain[plain.length - 1], 2);
+    return JSON.parse(plain.subarray(0, -1).toString());
+  }
+
+  const waitPush = async (n) => {
+    for (let i = 0; i < 50 && pushed.length < n; i++) await new Promise((r) => setTimeout(r, 20));
+  };
+
+  test('通知の登録は既知のプッシュサービスのみ', async () => {
+    const keys = { p256dh: ua.getPublicKey().toString('base64url'), auth: authSecret.toString('base64url') };
+    assert.equal((await ids.satoClient.req('POST', '/api/push/subscribe', { endpoint: 'https://intranet.local/hook', keys })).status, 400);
+    assert.equal((await ids.satoClient.req('POST', '/api/push/subscribe', { endpoint: 'http://fcm.googleapis.com/x', keys })).status, 400);
+    assert.equal((await ids.satoClient.req('POST', '/api/push/subscribe', { endpoint, keys: { ...keys, auth: 'short' } })).status, 400);
+    assert.equal((await ids.satoClient.req('POST', '/api/push/subscribe', { endpoint, keys })).status, 200);
+    assert.match((await ids.satoClient.req('GET', '/api/push/key')).data.publicKey, /^[A-Za-z0-9_-]{87}$/);
+  });
+
+  test('メッセージ送信で相手に暗号化された通知が届く・ミュート中は届かない', async () => {
+    pushed.length = 0;
+    const room = (await ids.yamadaClient.req('POST', '/api/chat/direct', { user_id: ids.sato })).data.id;
+    await ids.yamadaClient.req('POST', `/api/chat/rooms/${room}/messages`, { body: '物件資料を送ります' });
+    await waitPush(1);
+    assert.equal(pushed.length, 1);
+    assert.equal(pushed[0].url, endpoint);
+    const h = pushed[0].init.headers;
+    assert.equal(h['Content-Encoding'], 'aes128gcm');
+    assert.match(h.Authorization, /^vapid t=[\w-]+\.[\w-]+\.[\w-]+, k=[\w-]{87}$/);
+    const claims = JSON.parse(Buffer.from(h.Authorization.split(' ')[1].slice(2).split('.')[1], 'base64url'));
+    assert.equal(claims.aud, 'https://fcm.googleapis.com');
+    const msg = decrypt(pushed[0].init.body);
+    assert.deepEqual(msg, { title: '山田 太郎', body: '物件資料を送ります', url: `/#/chat/${room}`, tag: `chat-${room}` });
+
+    await ids.satoClient.req('PUT', `/api/chat/rooms/${room}/mute`, { muted: true });
+    assert.equal((await ids.satoClient.req('GET', `/api/chat/rooms/${room}`)).data.muted, true);
+    await ids.yamadaClient.req('POST', `/api/chat/rooms/${room}/messages`, { body: 'もう一件' });
+    await new Promise((r) => setTimeout(r, 100));
+    assert.equal(pushed.length, 1, 'ミュート中は送らない');
+    await ids.satoClient.req('PUT', `/api/chat/rooms/${room}/mute`, { muted: false });
+  });
+
+  test('失効した端末（410）は購読を削除する', async () => {
+    pushed.length = 0;
+    pushStatus = 410;
+    const room = (await ids.yamadaClient.req('POST', '/api/chat/direct', { user_id: ids.sato })).data.id;
+    await ids.yamadaClient.req('POST', `/api/chat/rooms/${room}/messages`, { body: 'x' });
+    await waitPush(1);
+    await new Promise((r) => setTimeout(r, 50));
+    pushStatus = 201;
+    assert.equal((await ids.satoClient.req('GET', '/api/push/devices')).data.length, 0);
+  });
+
+  test('画像・資料を添付でき、メンバー以外は取得できない', async () => {
+    const room = (await ids.yamadaClient.req('POST', '/api/chat/direct', { user_id: ids.sato })).data.id;
+    const send = (name, body, text = '') =>
+      fetch(`${base}/api/chat/rooms/${room}/files?${new URLSearchParams({ name, body: text })}`, {
+        method: 'POST',
+        headers: { cookie: ids.yamadaClient.cookie, 'x-csrf-token': ids.yamadaClient.csrf, 'content-type': 'application/octet-stream' },
+        body,
+      });
+    assert.equal((await send('外観.jpg', 'JPEGDATA', '現地の写真です')).status, 200);
+    assert.equal((await send('重要事項説明書.pdf', 'PDFDATA')).status, 200);
+    assert.equal((await send('page.html', '<script>')).status, 400, 'HTML は添付不可');
+    assert.equal((await send('logo.svg', '<svg>')).status, 400, 'SVG は添付不可');
+    const msgs = (await ids.satoClient.req('GET', `/api/chat/rooms/${room}/messages`)).data.messages;
+    const [img, pdf] = msgs.slice(-2);
+    assert.deepEqual(img.file, { id: img.file.id, name: '外観.jpg', size: 8, is_image: true });
+    assert.equal(img.body, '現地の写真です');
+    assert.equal(pdf.file.is_image, false);
+    const rooms = (await ids.satoClient.req('GET', '/api/chat/rooms')).data;
+    assert.equal(rooms.find((r) => r.id === room).last_body, '📎 重要事項説明書.pdf');
+
+    const imgRes = await fetch(`${base}/api/chat/files/${img.file.id}`, { headers: { cookie: ids.satoClient.cookie } });
+    assert.equal(imgRes.headers.get('content-type'), 'image/jpeg');
+    assert.match(imgRes.headers.get('content-disposition'), /^inline/);
+    assert.match(imgRes.headers.get('content-security-policy'), /sandbox/);
+    const pdfRes = await fetch(`${base}/api/chat/files/${pdf.file.id}`, { headers: { cookie: ids.satoClient.cookie } });
+    assert.equal(pdfRes.headers.get('content-type'), 'application/octet-stream');
+    assert.match(pdfRes.headers.get('content-disposition'), /^attachment/);
+    assert.equal(await pdfRes.text(), 'PDFDATA');
+    assert.equal((await fetch(`${base}/api/chat/files/${pdf.file.id}`, { headers: { cookie: admin.cookie } })).status, 404, 'メンバー以外は取得不可');
+
+    const before = readdirSync(filesDir).length;
+    assert.equal((await ids.yamadaClient.req('DELETE', `/api/chat/messages/${pdf.id}`)).status, 200);
+    assert.equal(readdirSync(filesDir).length, before - 1, 'メッセージ削除でファイルも削除');
   });
 });

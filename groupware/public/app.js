@@ -122,6 +122,7 @@ async function refreshCounts() {
       el.textContent = n || '';
       el.hidden = !n;
     });
+    document.title = state.counts.chat ? `(${state.counts.chat}) 社内グループウェア` : '社内グループウェア';
   } catch {
     /* 件数表示の失敗は無視 */
   }
@@ -341,6 +342,7 @@ function shell(content) {
       h('div', {}, state.me.name),
       h('div', { class: 'small', style: 'opacity:.7' }, state.me.login_id),
       h('button', { class: 'small', onclick: guard(async () => {
+        await pushUnsubscribe().catch(() => {});
         await api('POST', '/api/logout');
         state.me = null;
         location.hash = '';
@@ -1141,7 +1143,7 @@ async function pageChat(roomId) {
       ? h('div', {}, rooms.map((r) =>
           h('a', { href: `#/chat/${r.id}`, class: `chat-room${String(r.id) === roomId ? ' active' : ''}` },
             h('div', { class: 'row between' },
-              h('b', {}, r.name, r.is_direct ? null : h('span', { class: 'muted small' }, ` (${r.member_count})`)),
+              h('b', {}, r.name, r.is_direct ? null : h('span', { class: 'muted small' }, ` (${r.member_count})`), r.muted ? ' 🔕' : null),
               r.unread ? h('span', { class: 'badge' }, r.unread) : null,
             ),
             h('div', { class: 'muted small ellipsis' }, r.last_body || 'メッセージはまだありません'),
@@ -1163,11 +1165,21 @@ async function pageChat(roomId) {
   let lastId = 0;
   let firstId = 0;
   let lastDay = '';
+  const stickToBottom = () => {
+    if (log.scrollHeight - log.scrollTop - log.clientHeight < 400) log.scrollTop = log.scrollHeight;
+  };
+  const fileEl = (f) =>
+    f.is_image
+      ? h('a', { class: 'chat-image', href: `/api/chat/files/${f.id}`, target: '_blank', rel: 'noopener', title: f.name },
+          h('img', { src: `/api/chat/files/${f.id}`, alt: f.name, loading: 'lazy', onload: stickToBottom }))
+      : h('a', { class: 'chat-file', href: `/api/chat/files/${f.id}?download=1`, download: f.name },
+          fileBadge(f.name.split('.').pop().toLowerCase()), h('span', { class: 'name' }, f.name), h('span', { class: 'muted small' }, fmtSize(f.size)));
   const msgEl = (m) => {
     const mine = m.user_id === state.me.id;
     return h('div', { class: `msg${mine ? ' mine' : ''}`, 'data-id': m.id },
       mine ? null : h('div', { class: 'who small' }, m.user_name || '（退職者等）'),
-      h('div', { class: 'bubble pre' }, m.body),
+      m.file ? fileEl(m.file) : null,
+      m.body ? h('div', { class: 'bubble pre' }, m.body) : null,
       h('div', { class: 'meta small muted' }, m.created_at.slice(11, 16),
         mine ? h('button', { class: 'link small', onclick: guard(async () => {
           if (!(await confirmDialog('このメッセージを削除しますか？', '削除', true))) return;
@@ -1210,7 +1222,44 @@ async function pageChat(roomId) {
   }) }, 'さらに前を読み込む');
   log.append(more);
 
-  const input = h('textarea', { class: 'chat-input', placeholder: 'メッセージを入力（Enter で送信、Shift+Enter で改行）', maxlength: 5000 });
+  const input = h('textarea', { class: 'chat-input', placeholder: 'メッセージを入力（Enter で送信、Shift+Enter で改行）。ファイルはドラッグ＆ドロップや貼り付けでも送れます', maxlength: 5000 });
+  const fileInput = h('input', { type: 'file', multiple: true, hidden: true });
+  const uploading = h('div', { class: 'small muted uploading', hidden: true });
+  // 選んだファイルを1つずつ送信する。入力中の文章は最初のファイルに添える
+  const sendFiles = guard(async (files) => {
+    files = [...files];
+    if (!files.length) return;
+    let body = input.value.trim();
+    input.value = '';
+    try {
+      for (const [i, f] of files.entries()) {
+        uploading.hidden = false;
+        uploading.textContent = `送信中… ${f.name}（${i + 1}/${files.length}）`;
+        const qs = new URLSearchParams({ name: f.name || `画像-${Date.now()}.png`, body });
+        const res = await fetch(`/api/chat/rooms/${roomId}/files?${qs}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/octet-stream', 'X-CSRF-Token': state.me.csrf },
+          body: f,
+          credentials: 'same-origin',
+        });
+        if (!res.ok) throw new ApiError(res.status, await res.json().catch(() => ({})));
+        body = '';
+      }
+    } finally {
+      uploading.hidden = true;
+      fileInput.value = '';
+      if (body) input.value = body;
+      await poll();
+    }
+  });
+  fileInput.addEventListener('change', () => sendFiles(fileInput.files));
+  input.addEventListener('paste', (e) => {
+    const files = [...(e.clipboardData?.files || [])];
+    if (files.length) {
+      e.preventDefault();
+      sendFiles(files);
+    }
+  });
   const send = guard(async () => {
     if (!input.value.trim()) return;
     const body = input.value;
@@ -1253,24 +1302,49 @@ async function pageChat(roomId) {
       h('div', { class: 'chat-main' },
         h('div', { class: 'chat-head row between' },
           h('div', {}, h('b', {}, room.name), room.is_direct ? null : h('span', { class: 'muted small' }, `　${room.members.map((m) => m.name).join('、')}`)),
-          room.is_direct
+          h('div', { class: 'row', style: 'flex-wrap:nowrap' },
+            h('button', { class: 'small', title: 'このトークの通知', onclick: guard(async () => {
+              const r = await api('PUT', `/api/chat/rooms/${roomId}/mute`, { muted: !room.muted });
+              toast(r.muted ? 'このトークの通知をオフにしました' : 'このトークの通知をオンにしました');
+              route();
+            }) }, room.muted ? '🔕 通知オフ' : '🔔 通知オン'),
+            room.is_direct
             ? null
-            : h('div', { class: 'row' },
+            : [
                 h('button', { class: 'small', onclick: () => chatRoomForm(room) }, '設定'),
                 h('button', { class: 'small danger', onclick: guard(async () => {
                   if (!(await confirmDialog(`「${room.name}」から退出しますか？`, '退出', true))) return;
                   await api('POST', `/api/chat/rooms/${roomId}/leave`);
                   go('#/chat');
                 }) }, '退出'),
-              ),
+              ],
+          ),
         ),
         log,
-        h('div', { class: 'chat-send' }, input, h('button', { class: 'primary', onclick: send }, '送信')),
+        uploading,
+        h('div', { class: 'chat-send' },
+          h('button', { class: 'attach', title: 'ファイルを添付', 'aria-label': 'ファイルを添付', onclick: () => fileInput.click() }, '📎'),
+          fileInput, input, h('button', { class: 'primary', onclick: send }, '送信')),
       ),
     ),
   ]);
+  // トーク画面へのドラッグ＆ドロップで送信
+  const main = log.parentElement;
+  main.addEventListener('dragover', (e) => {
+    if ([...e.dataTransfer.types].includes('Files')) {
+      e.preventDefault();
+      main.classList.add('dropping');
+    }
+  });
+  main.addEventListener('dragleave', (e) => e.target === main && main.classList.remove('dropping'));
+  main.addEventListener('drop', (e) => {
+    e.preventDefault();
+    main.classList.remove('dropping');
+    sendFiles(e.dataTransfer.files);
+  });
   appendMessages(first.messages);
   log.scrollTop = log.scrollHeight;
+  if (!room.muted) offerPush(main);
   input.focus();
   await loadRooms();
   refreshCounts();
@@ -1676,6 +1750,82 @@ async function pageTemplateForm(id) {
   ]);
 }
 
+// ================= プッシュ通知 =================
+const pushSupported = () => 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window && window.isSecureContext;
+const isIos = () => /iPhone|iPad|iPod/.test(navigator.userAgent);
+const isStandalone = () => window.matchMedia('(display-mode: standalone)').matches || navigator.standalone === true;
+
+async function currentSubscription() {
+  if (!pushSupported()) return null;
+  const reg = await navigator.serviceWorker.ready;
+  return reg.pushManager.getSubscription();
+}
+
+async function pushSubscribe() {
+  const { publicKey } = await api('GET', '/api/push/key');
+  if (!publicKey) throw new Error('通知はサーバー側で無効になっています');
+  const perm = await Notification.requestPermission();
+  if (perm !== 'granted') throw new Error('通知が許可されませんでした。ブラウザの設定でこのサイトの通知を許可してください');
+  const reg = await navigator.serviceWorker.ready;
+  const key = Uint8Array.from(atob(publicKey.replace(/-/g, '+').replace(/_/g, '/')), (c) => c.charCodeAt(0));
+  const sub = (await reg.pushManager.getSubscription()) || (await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: key }));
+  await api('POST', '/api/push/subscribe', sub.toJSON());
+}
+
+async function pushUnsubscribe() {
+  const sub = await currentSubscription();
+  if (!sub) return;
+  await api('POST', '/api/push/unsubscribe', { endpoint: sub.endpoint }).catch(() => {});
+  await sub.unsubscribe();
+}
+
+function pushHelp() {
+  if (!window.isSecureContext) return 'HTTPS で接続している場合のみ通知を利用できます（システム管理者にご確認ください）。';
+  if (isIos() && !isStandalone()) return 'iPhone・iPad では、Safari の共有ボタン →「ホーム画面に追加」でアプリとして追加し、そこから開くと通知を受け取れます（iOS 16.4 以降）。';
+  if (!pushSupported()) return 'このブラウザは通知に対応していません。Chrome・Edge・Safari の最新版をお使いください。';
+  return '';
+}
+
+async function pushCard() {
+  const help = pushHelp();
+  const sub = help ? null : await currentSubscription().catch(() => null);
+  const status = h('p', {}, help ? help : sub ? '✅ この端末で通知を受け取ります。' : 'この端末では通知を受け取っていません。');
+  return h('div', { class: 'card', style: 'max-width:480px' },
+    h('h2', {}, '通知'),
+    h('p', { class: 'small muted' }, 'チャットの新着メッセージを、ブラウザやアプリを閉じていてもこの端末に通知します。端末（PC・スマホ）ごとに設定してください。トークごとの通知オン/オフはチャット画面の 🔔 から切り替えられます。'),
+    status,
+    help
+      ? null
+      : h('div', { class: 'row' },
+          sub
+            ? [
+                h('button', { onclick: guard(async () => (await api('POST', '/api/push/test'), toast('テスト通知を送りました'))) }, 'テスト通知を送る'),
+                h('button', { class: 'danger', onclick: guard(async () => (await pushUnsubscribe(), toast('この端末の通知を停止しました'), route())) }, '通知を停止'),
+              ]
+            : h('button', { class: 'primary', onclick: guard(async () => (await pushSubscribe(), toast('通知をオンにしました'), route())) }, 'この端末で通知を受け取る'),
+        ),
+  );
+}
+
+// チャット画面で、まだ通知を設定していない端末に案内を出す
+async function offerPush(container) {
+  try {
+    if (pushHelp() || (await currentSubscription()) || Notification.permission === 'denied') return;
+    if (localStorage.getItem('gw_push_dismissed')) return;
+  } catch {
+    return;
+  }
+  const bar = h('div', { class: 'push-offer small' },
+    '🔔 新着メッセージを通知で受け取れます。',
+    h('button', { class: 'small primary', onclick: guard(async () => (await pushSubscribe(), bar.remove(), toast('通知をオンにしました'))) }, '通知をオンにする'),
+    h('button', { class: 'small link', onclick: () => {
+      try { localStorage.setItem('gw_push_dismissed', '1'); } catch { /* 保存できなくても閉じる */ }
+      bar.remove();
+    } }, '今はしない'),
+  );
+  container.insertBefore(bar, container.children[1] || null);
+}
+
 // ================= 個人設定 =================
 async function pageSettings() {
   const email = h('input', { type: 'email', value: state.me.email || '' });
@@ -1696,6 +1846,7 @@ async function pageSettings() {
       }) }, '保存'),
       h('p', { class: 'muted small', style: 'margin-top:8px' }, '氏名・部署の変更はシステム管理者に依頼してください。'),
     ),
+    await pushCard(),
     passwordForm(false),
   ]);
 }
@@ -1980,6 +2131,7 @@ async function route() {
 }
 
 async function boot() {
+  if ('serviceWorker' in navigator && window.isSecureContext) navigator.serviceWorker.register('/sw.js').catch(() => {});
   try {
     state.me = state.me || (await api('GET', '/api/me'));
   } catch {

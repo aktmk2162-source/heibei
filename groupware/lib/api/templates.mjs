@@ -1,10 +1,8 @@
 // テンプレート集（シミュレーション・自動化ツールなどのファイルを版管理して共有する）。
 // ファイル本体はディスク（filesDir）に保存し、DB にはメタ情報だけを持つ。
-import { createHash, randomBytes } from 'node:crypto';
-import { createWriteStream, mkdirSync } from 'node:fs';
-import { rename, rm, stat } from 'node:fs/promises';
-import { join } from 'node:path';
+import { stat } from 'node:fs/promises';
 import { tx } from '../db.mjs';
+import { DOCUMENT_EXT, MACRO_EXT, cleanFilename, ext } from '../files.mjs';
 import { fail } from '../http.mjs';
 import { int, str } from '../validate.mjs';
 
@@ -19,27 +17,7 @@ export const TEMPLATE_CATEGORIES = [
   'その他',
 ];
 
-// 実行ファイル（.exe/.bat/.ps1/.vbs/.js 等）は配布させない
-const ALLOWED_EXT = new Set([
-  'xlsx', 'xlsm', 'xlsb', 'xls', 'xltx', 'xltm', 'csv',
-  'docx', 'docm', 'doc', 'dotx', 'pptx', 'pptm', 'ppt', 'pdf',
-  'zip', 'txt', 'md', 'json', 'py', 'gs', 'bas', 'cls', 'frm', 'sql',
-]);
-const MACRO_EXT = new Set(['xlsm', 'xlsb', 'xltm', 'docm', 'pptm', 'bas', 'cls', 'frm', 'py', 'gs', 'zip']);
-
-const ext = (name) => (name.match(/\.([A-Za-z0-9]+)$/)?.[1] || '').toLowerCase();
-
-function cleanFilename(raw) {
-  const name = String(raw || '')
-    .replace(/[\\/]/g, '_')
-    .replace(/[\x00-\x1f\x7f]/g, '')
-    .trim();
-  if (!name || name.length > 200) fail(400, 'ファイル名が正しくありません');
-  if (!ALLOWED_EXT.has(ext(name))) {
-    fail(400, `このファイル形式は登録できません。対応形式: ${[...ALLOWED_EXT].join(', ')}`);
-  }
-  return name;
-}
+const ALLOWED_EXT = new Set(DOCUMENT_EXT);
 
 const canManage = (t, user) => t.owner_id === user.id || user.role === 'admin';
 
@@ -55,37 +33,7 @@ function fileRow(f) {
   return { ...f, ext: ext(f.original_name), has_macro: MACRO_EXT.has(ext(f.original_name)), stored_name: undefined };
 }
 
-export function register(r, { filesDir, maxUploadBytes }) {
-  if (filesDir) mkdirSync(filesDir, { recursive: true });
-
-  // 本文をストリームで受け取り、サイズ上限を守りながら一時ファイルに保存する
-  async function receiveFile(req) {
-    if (!filesDir) fail(500, 'ファイル保存先が設定されていません');
-    const declared = Number(req.headers['content-length'] || 0);
-    if (declared > maxUploadBytes) fail(413, `ファイルは${Math.floor(maxUploadBytes / 1024 / 1024)}MBまでです`);
-    const stored = `${Date.now()}-${randomBytes(12).toString('hex')}`;
-    const tmp = join(filesDir, `${stored}.part`);
-    const hash = createHash('sha256');
-    let size = 0;
-    const out = createWriteStream(tmp, { flags: 'wx' });
-    try {
-      for await (const chunk of req) {
-        size += chunk.length;
-        if (size > maxUploadBytes) fail(413, `ファイルは${Math.floor(maxUploadBytes / 1024 / 1024)}MBまでです`);
-        hash.update(chunk);
-        if (!out.write(chunk)) await new Promise((ok) => out.once('drain', ok));
-      }
-      await new Promise((ok, ng) => out.end((e) => (e ? ng(e) : ok())));
-      if (!size) fail(400, '空のファイルは登録できません');
-      await rename(tmp, join(filesDir, stored));
-      return { stored, size, sha256: hash.digest('hex') };
-    } catch (err) {
-      out.destroy();
-      await rm(tmp, { force: true });
-      throw err;
-    }
-  }
-
+export function register(r, { store }) {
   r.add('GET', '/api/template-categories', () => TEMPLATE_CATEGORIES);
 
   r.add('GET', '/api/templates', (c) => {
@@ -169,9 +117,9 @@ export function register(r, { filesDir, maxUploadBytes }) {
       const id = int(c.params.id, 'ID', { required: true });
       const t = loadTemplate(c.db, id);
       if (!canManage(t, c.user)) fail(403, '登録者または管理者のみファイルを更新できます');
-      const name = cleanFilename(c.query.get('name'));
+      const name = cleanFilename(c.query.get('name'), ALLOWED_EXT);
       const note = str(c.query.get('note'), '変更内容', { max: 500 });
-      const saved = await receiveFile(c.req);
+      const saved = await store.receive(c.req);
       try {
         const version = tx(c.db, () => {
           const v = (c.db.prepare('SELECT MAX(version) v FROM template_files WHERE template_id = ?').get(id).v || 0) + 1;
@@ -187,7 +135,7 @@ export function register(r, { filesDir, maxUploadBytes }) {
         c.audit('template_file_uploaded', `${t.title} v${version}`);
         return { version };
       } catch (err) {
-        await rm(join(filesDir, saved.stored), { force: true });
+        await store.remove(saved.stored);
         throw err;
       }
     },
@@ -198,7 +146,7 @@ export function register(r, { filesDir, maxUploadBytes }) {
     const id = int(c.params.id, 'ID', { required: true });
     const f = c.db.prepare('SELECT * FROM template_files WHERE id = ?').get(id);
     if (!f) fail(404, 'ファイルが見つかりません');
-    const path = join(filesDir, f.stored_name);
+    const path = store.path(f.stored_name);
     try {
       await stat(path);
     } catch {
@@ -217,7 +165,7 @@ export function register(r, { filesDir, maxUploadBytes }) {
     const latest = c.db.prepare('SELECT MAX(version) v FROM template_files WHERE template_id = ?').get(f.template_id).v;
     if (f.version === latest) fail(400, '最新版は削除できません');
     c.db.prepare('DELETE FROM template_files WHERE id = ?').run(id);
-    await rm(join(filesDir, f.stored_name), { force: true });
+    await store.remove(f.stored_name);
     return { ok: true };
   });
 
@@ -227,7 +175,7 @@ export function register(r, { filesDir, maxUploadBytes }) {
     if (!canManage(t, c.user)) fail(403, '登録者または管理者のみ削除できます');
     const files = c.db.prepare('SELECT stored_name FROM template_files WHERE template_id = ?').all(id);
     c.db.prepare('DELETE FROM templates WHERE id = ?').run(id);
-    for (const f of files) await rm(join(filesDir, f.stored_name), { force: true });
+    for (const f of files) await store.remove(f.stored_name);
     c.audit('template_deleted', t.title);
     return { ok: true };
   });

@@ -252,3 +252,18 @@ a.tpl-card .excerpt { flex: 1; margin: 0; }
 .fbadge.f-vba { background: #5c2d91; }
 a.btn.primary-btn { background: var(--primary); border-color: var(--primary); color: #fff; padding: 8px 18px; font-weight: 600; }
 a.btn.primary-btn:hover { background: var(--primary-hover); text-decoration: none; }
+
+/* ---- チャット添付・通知 ---- */
+.chat-main.dropping { outline: 3px dashed var(--primary); outline-offset: -6px; }
+.chat-image { display: inline-block; margin: 2px 0; }
+.chat-image img { max-width: min(320px, 100%); max-height: 260px; border-radius: 10px; border: 1px solid var(--border); display: block; background: #fff; }
+.chat-file { display: inline-flex; align-items: center; gap: 8px; background: #fff; border: 1px solid var(--border); border-radius: 10px; padding: 8px 12px; color: var(--text); margin: 2px 0; max-width: 100%; }
+.chat-file:hover { border-color: var(--primary); text-decoration: none; }
+.chat-file .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 220px; }
+.msg .bubble + .meta, .msg .chat-file + .meta, .msg .chat-image + .meta { margin-top: 2px; }
+.msg .chat-file + .bubble, .msg .chat-image + .bubble { margin-top: 4px; }
+button.attach { font-size: 18px; padding: 4px 10px; align-self: stretch; }
+.uploading { padding: 4px 16px; background: var(--warn-soft); }
+.push-offer { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; padding: 8px 16px; background: var(--primary-soft); border-bottom: 1px solid var(--border); }
+.msg > a.chat-file, .msg > a.chat-image { display: flex; width: fit-content; }
+.msg.mine > a.chat-file, .msg.mine > a.chat-image { margin-left: auto; }
