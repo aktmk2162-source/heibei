@@ -1789,10 +1789,11 @@ function pushHelp() {
 async function pushCard() {
   const help = pushHelp();
   const sub = help ? null : await currentSubscription().catch(() => null);
+  const prefs = await api('GET', '/api/push/prefs');
   const status = h('p', {}, help ? help : sub ? '✅ この端末で通知を受け取ります。' : 'この端末では通知を受け取っていません。');
   return h('div', { class: 'card', style: 'max-width:480px' },
     h('h2', {}, '通知'),
-    h('p', { class: 'small muted' }, 'チャットの新着メッセージを、ブラウザやアプリを閉じていてもこの端末に通知します。端末（PC・スマホ）ごとに設定してください。トークごとの通知オン/オフはチャット画面の 🔔 から切り替えられます。'),
+    h('p', { class: 'small muted' }, 'チャットの新着、承認依頼、日程調整、ToDo の依頼などを、ブラウザやアプリを閉じていてもこの端末に通知します。端末（PC・スマホ）ごとに設定してください。'),
     status,
     help
       ? null
@@ -1804,6 +1805,17 @@ async function pushCard() {
               ]
             : h('button', { class: 'primary', onclick: guard(async () => (await pushSubscribe(), toast('通知をオンにしました'), route())) }, 'この端末で通知を受け取る'),
         ),
+    h('h3', { style: 'margin-top:16px' }, '受け取る通知の種類'),
+    h('p', { class: 'small muted' }, 'すべての端末に共通の設定です。チャットはトークごとにも 🔔 でオン/オフできます。'),
+    prefs.map((p) =>
+      h('div', {}, h('label', { class: 'check' },
+        h('input', { type: 'checkbox', checked: p.enabled, onchange: guard(async (e) => {
+          await api('PUT', '/api/push/prefs', { kind: p.kind, enabled: e.target.checked });
+          toast(`${p.label}の通知を${e.target.checked ? 'オン' : 'オフ'}にしました`);
+        }) }),
+        p.label,
+      )),
+    ),
   );
 }
 

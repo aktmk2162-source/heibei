@@ -81,6 +81,14 @@ export function encryptPayload(payload, p256dh, auth, { asPrivate, salt: fixedSa
   return Buffer.concat([salt, rs, Buffer.from([asPublic.length]), asPublic, body]);
 }
 
+// 通知の種類（個人設定で種類ごとにオフにできる）
+export const NOTIFY_KINDS = {
+  chat: 'チャットの新着メッセージ',
+  workflow: 'ワークフロー（承認依頼・承認結果）',
+  poll: '日程調整（回答依頼・決定）',
+  todo: 'ToDo（依頼・完了）',
+};
+
 export class Pusher {
   constructor(db, { subject = 'mailto:admin@example.com', fetchImpl = globalThis.fetch, log = console } = {}) {
     this.db = db;
@@ -88,6 +96,21 @@ export class Pusher {
     this.subject = subject;
     this.fetch = fetchImpl;
     this.log = log;
+  }
+
+  // 業務処理から呼ぶ入口。無効ユーザーと、その種類をオフにしている人を除いて送る（応答は待たない）。
+  notify(userIds, message, kind) {
+    const ids = [...new Set(userIds)].filter(Boolean);
+    if (!ids.length) return;
+    const ph = ids.map(() => '?').join(',');
+    const to = this.db
+      .prepare(
+        `SELECT u.id FROM users u WHERE u.id IN (${ph}) AND u.active = 1
+           AND NOT EXISTS (SELECT 1 FROM notify_prefs p WHERE p.user_id = u.id AND p.kind = ? AND p.enabled = 0)`,
+      )
+      .all(...ids, kind)
+      .map((x) => x.id);
+    this.pending = this.sendToUsers(to, message).catch(() => {});
   }
 
   // 指定ユーザーの全端末へ送る。失効した購読（404/410）は削除する。送信の失敗は業務処理を止めない。

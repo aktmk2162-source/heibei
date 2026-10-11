@@ -641,3 +641,101 @@ describe('チャットの添付と通知', () => {
     assert.equal(readdirSync(filesDir).length, before - 1, 'メッセージ削除でファイルも削除');
   });
 });
+
+describe('業務の通知（承認・日程調整・ToDo）', () => {
+  // 社員ごとに端末を登録し、届いた通知を復号して宛先と内容を確かめる
+  const devices = new Map();
+  const hm = (k, d) => createHmac('sha256', k).update(d).digest();
+  function open(endpoint, body) {
+    const { ecdh, auth } = devices.get(endpoint);
+    const salt = body.subarray(0, 16);
+    const asPublic = body.subarray(21, 21 + body[20]);
+    const ct = body.subarray(21 + body[20]);
+    const ikm = hm(hm(auth, ecdh.computeSecret(asPublic)), Buffer.concat([Buffer.from('WebPush: info\0'), ecdh.getPublicKey(), asPublic, Buffer.from([1])]));
+    const prk = hm(salt, ikm);
+    const d = createDecipheriv('aes-128-gcm', hm(prk, Buffer.from('Content-Encoding: aes128gcm\0\x01')).subarray(0, 16), hm(prk, Buffer.from('Content-Encoding: nonce\0\x01')).subarray(0, 12));
+    d.setAuthTag(ct.subarray(ct.length - 16));
+    return JSON.parse(Buffer.concat([d.update(ct.subarray(0, ct.length - 16)), d.final()]).subarray(0, -1).toString());
+  }
+  const who = new Map();
+  async function register(client, name) {
+    const ecdh = createECDH('prime256v1');
+    ecdh.generateKeys();
+    const auth = randomBytes(16);
+    const endpoint = `https://fcm.googleapis.com/fcm/send/${name}-${randomBytes(4).toString('hex')}`;
+    devices.set(endpoint, { ecdh, auth });
+    who.set(endpoint, name);
+    const r = await client.req('POST', '/api/push/subscribe', { endpoint, keys: { p256dh: ecdh.getPublicKey().toString('base64url'), auth: auth.toString('base64url') } });
+    assert.equal(r.status, 200);
+  }
+  // 操作を行い、その結果届いた通知を [宛先, 内容] の一覧で返す
+  async function received(action) {
+    pushed.length = 0;
+    await action();
+    await new Promise((r) => setTimeout(r, 120));
+    return pushed.map((p) => [who.get(p.url), open(p.url, p.init.body)]);
+  }
+
+  before(async () => {
+    await register(ids.yamadaClient, 'yamada');
+    await register(ids.satoClient, 'sato');
+    await register(admin, 'admin');
+  });
+
+  test('承認依頼 → 次の承認者 → 差し戻しの結果が順に届く', async () => {
+    const adminId = (await admin.req('GET', '/api/me')).data.id;
+    let rid;
+    let got = await received(async () => {
+      rid = (await ids.yamadaClient.req('POST', '/api/requests', { type: '稟議', title: '看板設置', amount: 300000, approver_ids: [ids.sato, adminId] })).data.id;
+    });
+    assert.deepEqual(got.map(([w, m]) => [w, m.title, m.body]), [['sato', '承認依頼', '山田 太郎さんの稟議「看板設置」']]);
+    assert.equal(got[0][1].url, `/#/workflow/${rid}`);
+    got = await received(() => ids.satoClient.req('POST', `/api/requests/${rid}/act`, { action: 'approve' }));
+    assert.deepEqual(got.map(([w, m]) => [w, m.title]), [['admin', '承認依頼']]);
+    got = await received(() => admin.req('POST', `/api/requests/${rid}/act`, { action: 'return', comment: '見積書を添付してください' }));
+    assert.deepEqual(got.map(([w, m]) => [w, m.title, m.body]), [['yamada', '申請が差し戻されました', '稟議「看板設置」\n管理者: 見積書を添付してください']]);
+    got = await received(() => ids.yamadaClient.req('PUT', `/api/requests/${rid}`, { type: '稟議', title: '看板設置', approver_ids: [ids.sato] }));
+    assert.deepEqual(got.map(([w, m]) => [w, m.title]), [['sato', '承認依頼（再申請）']]);
+    got = await received(() => ids.satoClient.req('POST', `/api/requests/${rid}/act`, { action: 'approve' }));
+    assert.deepEqual(got.map(([w, m]) => [w, m.title]), [['yamada', '申請が承認されました']]);
+  });
+
+  test('種類ごとに通知をオフにできる', async () => {
+    const prefs = (await ids.satoClient.req('GET', '/api/push/prefs')).data;
+    assert.deepEqual(prefs.map((p) => p.kind), ['chat', 'workflow', 'poll', 'todo']);
+    assert.ok(prefs.every((p) => p.enabled));
+    await ids.satoClient.req('PUT', '/api/push/prefs', { kind: 'workflow', enabled: false });
+    const got = await received(() => ids.yamadaClient.req('POST', '/api/requests', { type: '稟議', title: 'x', approver_ids: [ids.sato] }));
+    assert.equal(got.length, 0);
+    assert.equal((await ids.satoClient.req('GET', '/api/push/prefs')).data.find((p) => p.kind === 'workflow').enabled, false);
+    await ids.satoClient.req('PUT', '/api/push/prefs', { kind: 'workflow', enabled: true });
+    assert.equal((await ids.satoClient.req('PUT', '/api/push/prefs', { kind: 'unknown', enabled: true })).status, 400);
+  });
+
+  test('日程調整: 回答依頼 → 全員回答 → 決定', async () => {
+    let pid;
+    let got = await received(async () => {
+      pid = (await ids.yamadaClient.req('POST', '/api/polls', { title: '売主面談', member_ids: [ids.sato], slots: [{ start_at: '2026-06-01 10:00', end_at: '2026-06-01 11:00' }] })).data.id;
+    });
+    assert.deepEqual(got.map(([w, m]) => [w, m.title, m.body]), [['sato', '日程調整の回答依頼', '山田 太郎さんから「売主面談」（候補1件）']]);
+    const slot = (await ids.satoClient.req('GET', `/api/polls/${pid}`)).data.slots[0];
+    got = await received(() => ids.satoClient.req('PUT', `/api/polls/${pid}/answer`, { answers: { [slot.id]: 'yes' } }));
+    assert.deepEqual(got.map(([w, m]) => [w, m.title]), [['yamada', '日程調整の回答がそろいました']]);
+    got = await received(() => ids.satoClient.req('PUT', `/api/polls/${pid}/answer`, { answers: { [slot.id]: 'maybe' } }));
+    assert.equal(got.length, 0, '回答の修正では再通知しない');
+    got = await received(() => ids.yamadaClient.req('POST', `/api/polls/${pid}/decide`, { slot_id: slot.id }));
+    assert.deepEqual(got.map(([w, m]) => [w, m.title, m.body]), [['sato', '日程が決まりました', '「売主面談」6/1(月) 10:00〜11:00（予定に登録済み）']]);
+  });
+
+  test('ToDo: 依頼と完了', async () => {
+    let tid;
+    let got = await received(async () => {
+      tid = (await ids.yamadaClient.req('POST', '/api/todos', { title: '登記簿取得', assignee_id: ids.sato, due_date: '2026-06-05' })).data.id;
+    });
+    assert.deepEqual(got.map(([w, m]) => [w, m.title, m.body]), [['sato', 'ToDo の依頼', '山田 太郎さんから「登記簿取得」（期限 6/5）']]);
+    got = await received(() => ids.yamadaClient.req('POST', '/api/todos', { title: '自分用' }));
+    assert.equal(got.length, 0, '自分のToDoは通知しない');
+    got = await received(() => ids.satoClient.req('PUT', `/api/todos/${tid}`, { done: true }));
+    assert.deepEqual(got.map(([w, m]) => [w, m.title]), [['yamada', '依頼した ToDo が完了しました']]);
+  });
+});

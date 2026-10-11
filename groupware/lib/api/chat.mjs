@@ -60,26 +60,24 @@ async function removeRoomFiles(db, store, roomId) {
 }
 
 export function register(r, { store, pusher } = {}) {
-  // 送信者と通知オフの人を除くメンバーへプッシュ通知する（応答は待たない）
+  // 送信者とミュート中の人を除くメンバーへプッシュ通知する（応答は待たない）
   function notify(db, roomId, sender, text) {
     if (!pusher) return;
     const room = db.prepare('SELECT * FROM chat_rooms WHERE id = ?').get(roomId);
     const to = db
-      .prepare(
-        `SELECT cm.user_id FROM chat_members cm JOIN users u ON u.id = cm.user_id
-          WHERE cm.room_id = ? AND cm.user_id != ? AND cm.muted = 0 AND u.active = 1`,
-      )
+      .prepare('SELECT user_id FROM chat_members WHERE room_id = ? AND user_id != ? AND muted = 0')
       .all(roomId, sender.id)
       .map((x) => x.user_id);
-    const body = text.length > 120 ? `${text.slice(0, 120)}…` : text;
-    pusher
-      .sendToUsers(to, {
+    pusher.notify(
+      to,
+      {
         title: room.is_direct ? sender.name : `${room.name}（${sender.name}）`,
-        body,
+        body: text.length > 120 ? `${text.slice(0, 120)}…` : text,
         url: `/#/chat/${roomId}`,
         tag: `chat-${roomId}`,
-      })
-      .catch(() => {});
+      },
+      'chat',
+    );
   }
 
   r.add('GET', '/api/chat/rooms', (c) =>

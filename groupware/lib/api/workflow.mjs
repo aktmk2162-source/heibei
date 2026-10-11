@@ -73,7 +73,27 @@ export function pendingApprovalCount(db, userId) {
     .get(userId).n;
 }
 
-export function register(r) {
+export function register(r, { pusher } = {}) {
+  // 申請の状態に応じて、次に対応すべき人へ通知する
+  function notifyRequest(db, id, event, actorName, comment = '') {
+    if (!pusher) return;
+    const req = db
+      .prepare('SELECT r.*, u.name applicant_name FROM requests r JOIN users u ON u.id = r.applicant_id WHERE r.id = ?')
+      .get(id);
+    const what = `${req.type}「${req.title}」`;
+    const base = { url: `/#/workflow/${id}`, tag: `wf-${id}` };
+    if (req.status === 'pending') {
+      const step = db.prepare('SELECT approver_id FROM request_steps WHERE request_id = ? AND step_no = ?').get(id, req.current_step);
+      const title = event === 'resubmit' ? '承認依頼（再申請）' : '承認依頼';
+      pusher.notify([step.approver_id], { ...base, title, body: `${req.applicant_name}さんの${what}` }, 'workflow');
+      return;
+    }
+    const label = { approved: '承認されました', rejected: '却下されました', returned: '差し戻されました' }[req.status];
+    if (!label) return;
+    const note = comment ? `\n${actorName}: ${comment.slice(0, 80)}` : '';
+    pusher.notify([req.applicant_id], { ...base, title: `申請が${label}`, body: `${what}${note}` }, 'workflow');
+  }
+
   r.add('GET', '/api/request-types', () => REQUEST_TYPES);
 
   // box: todo=自分の承認待ち / mine=自分の申請 / done=自分が処理済み / all=全件（管理者）
@@ -116,6 +136,7 @@ export function register(r) {
       return rid;
     });
     c.audit('request_submitted', `#${id}`);
+    notifyRequest(c.db, id, 'submit', c.user.name);
     return { id };
   });
 
@@ -136,6 +157,7 @@ export function register(r) {
       insertSteps(c.db, id, f.approverIds);
     });
     c.audit('request_resubmitted', `#${id}`);
+    notifyRequest(c.db, id, 'resubmit', c.user.name);
     return { ok: true };
   });
 
@@ -166,6 +188,7 @@ export function register(r) {
         .run(status, next, id);
     });
     c.audit(`request_${action}`, `#${id}`);
+    notifyRequest(c.db, id, action, c.user.name, comment);
     return loadRequest(c.db, id, c.user);
   });
 

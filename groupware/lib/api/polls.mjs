@@ -26,7 +26,20 @@ function loadPoll(db, id, user) {
   return { ...p, is_member: isMember, is_organizer: p.organizer_id === user.id };
 }
 
-export function register(r) {
+const WD = ['日', '月', '火', '水', '木', '金', '土'];
+function slotLabel(s) {
+  const [y, m, d] = s.start_at.slice(0, 10).split('-').map(Number);
+  return `${m}/${d}(${WD[new Date(Date.UTC(y, m - 1, d)).getUTCDay()]}) ${s.start_at.slice(11)}〜${s.end_at.slice(11)}`;
+}
+
+export function register(r, { pusher } = {}) {
+  // 主催者以外の参加者へ通知する
+  function notifyMembers(db, id, organizerId, title, body) {
+    if (!pusher) return;
+    const to = db.prepare('SELECT user_id FROM poll_members WHERE poll_id = ? AND user_id != ?').all(id, organizerId ?? 0).map((x) => x.user_id);
+    pusher.notify(to, { title, body, url: `/#/poll/${id}`, tag: `poll-${id}` }, 'poll');
+  }
+
   r.add('GET', '/api/polls', (c) =>
     c.db
       .prepare(
@@ -101,6 +114,7 @@ export function register(r) {
       for (const uid of members) im.run(pid, uid);
       return pid;
     });
+    notifyMembers(c.db, id, c.user.id, '日程調整の回答依頼', `${c.user.name}さんから「${title}」（候補${slots.length}件）`);
     return { id };
   });
 
@@ -114,6 +128,7 @@ export function register(r) {
     if (!answers || typeof answers !== 'object' || Array.isArray(answers)) fail(400, '回答の形式が正しくありません');
     const slotIds = new Set(c.db.prepare('SELECT id FROM poll_slots WHERE poll_id = ?').all(id).map((s) => s.id));
     const comment = str(c.body.comment, 'コメント', { max: 500 });
+    const firstAnswer = !c.db.prepare('SELECT answered_at FROM poll_members WHERE poll_id = ? AND user_id = ?').get(id, c.user.id).answered_at;
     tx(c.db, () => {
       const up = c.db.prepare(
         'INSERT INTO poll_answers (slot_id, user_id, answer) VALUES (?, ?, ?) ON CONFLICT(slot_id, user_id) DO UPDATE SET answer = excluded.answer',
@@ -128,6 +143,13 @@ export function register(r) {
         .prepare(`UPDATE poll_members SET comment = ?, answered_at = datetime('now','localtime') WHERE poll_id = ? AND user_id = ?`)
         .run(comment, id, c.user.id);
     });
+    // 最後の1人が回答したら主催者へ知らせる
+    const waiting = c.db
+      .prepare('SELECT COUNT(*) n FROM poll_members WHERE poll_id = ? AND answered_at IS NULL AND user_id != ?')
+      .get(id, p.organizer_id ?? 0).n;
+    if (pusher && firstAnswer && !waiting && p.organizer_id && p.organizer_id !== c.user.id) {
+      pusher.notify([p.organizer_id], { title: '日程調整の回答がそろいました', body: `「${p.title}」の全員が回答しました。日時を決定してください`, url: `/#/poll/${id}`, tag: `poll-${id}` }, 'poll');
+    }
     return { ok: true };
   });
 
@@ -160,6 +182,7 @@ export function register(r) {
       c.db.prepare(`UPDATE polls SET status = 'decided', decided_slot_id = ?, event_id = ? WHERE id = ?`).run(slotId, eid, id);
       return eid;
     });
+    notifyMembers(c.db, id, c.user.id, '日程が決まりました', `「${p.title}」${slotLabel(slot)}（予定に登録済み）`);
     return { event_id: eventId };
   });
 
@@ -169,6 +192,7 @@ export function register(r) {
     if (!p.is_organizer) fail(403, '主催者のみ中止できます');
     if (p.status !== 'open') fail(409, 'この日程調整は既に決定・中止されています');
     c.db.prepare(`UPDATE polls SET status = 'closed' WHERE id = ?`).run(id);
+    notifyMembers(c.db, id, c.user.id, '日程調整が中止されました', `「${p.title}」`);
     return { ok: true };
   });
 

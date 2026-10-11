@@ -1,6 +1,6 @@
 // プッシュ通知の購読管理（端末ごと）。
 import { fail } from '../http.mjs';
-import { isAllowedEndpoint } from '../push.mjs';
+import { NOTIFY_KINDS, isAllowedEndpoint } from '../push.mjs';
 import { str } from '../validate.mjs';
 
 export function register(r, { pusher }) {
@@ -30,6 +30,25 @@ export function register(r, { pusher }) {
   r.add('POST', '/api/push/unsubscribe', (c) => {
     const endpoint = str(c.body.endpoint, 'endpoint', { required: true, max: 1000 });
     c.db.prepare('DELETE FROM push_subscriptions WHERE endpoint = ? AND user_id = ?').run(endpoint, c.user.id);
+    return { ok: true };
+  });
+
+  r.add('GET', '/api/push/prefs', (c) => {
+    const off = new Set(
+      c.db.prepare('SELECT kind FROM notify_prefs WHERE user_id = ? AND enabled = 0').all(c.user.id).map((x) => x.kind),
+    );
+    return Object.entries(NOTIFY_KINDS).map(([kind, label]) => ({ kind, label, enabled: !off.has(kind) }));
+  });
+
+  r.add('PUT', '/api/push/prefs', (c) => {
+    const kind = c.body.kind;
+    if (!NOTIFY_KINDS[kind]) fail(400, '通知の種類が正しくありません');
+    c.db
+      .prepare(
+        `INSERT INTO notify_prefs (user_id, kind, enabled) VALUES (?, ?, ?)
+         ON CONFLICT(user_id, kind) DO UPDATE SET enabled = excluded.enabled`,
+      )
+      .run(c.user.id, kind, c.body.enabled ? 1 : 0);
     return { ok: true };
   });
 

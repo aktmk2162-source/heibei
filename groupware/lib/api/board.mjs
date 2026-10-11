@@ -15,7 +15,7 @@ function loadPost(db, id) {
 
 const canManagePost = (p, user) => p.author_id === user.id || user.role === 'admin';
 
-export function register(r) {
+export function register(r, { pusher } = {}) {
   // ---- 掲示板 ----
   r.add('GET', '/api/posts', (c) =>
     c.db
@@ -112,6 +112,10 @@ export function register(r) {
     const { lastInsertRowid } = c.db
       .prepare('INSERT INTO todos (user_id, created_by, title, due_date, memo) VALUES (?, ?, ?, ?, ?)')
       .run(assignee, c.user.id, title, due, memo);
+    if (pusher && assignee !== c.user.id) {
+      const dueText = due ? `（期限 ${Number(due.slice(5, 7))}/${Number(due.slice(8, 10))}）` : '';
+      pusher.notify([assignee], { title: 'ToDo の依頼', body: `${c.user.name}さんから「${title}」${dueText}`, url: '/#/todo', tag: `todo-${lastInsertRowid}` }, 'todo');
+    }
     return { id: Number(lastInsertRowid) };
   });
 
@@ -123,6 +127,10 @@ export function register(r) {
     const memo = c.body.memo === undefined ? t.memo : str(c.body.memo, 'メモ', { max: 2000 });
     const done = c.body.done === undefined ? t.done : bool(c.body.done) ? 1 : 0;
     c.db.prepare('UPDATE todos SET title = ?, due_date = ?, memo = ?, done = ? WHERE id = ?').run(title, due, memo, done, id);
+    // 依頼された ToDo を担当者が完了したら依頼者へ知らせる
+    if (pusher && done && !t.done && t.created_by && t.created_by !== c.user.id && t.user_id === c.user.id) {
+      pusher.notify([t.created_by], { title: '依頼した ToDo が完了しました', body: `${c.user.name}さんが「${title}」を完了しました`, url: '/#/todo?box=requested', tag: `todo-${id}` }, 'todo');
+    }
     return { ok: true };
   });
 

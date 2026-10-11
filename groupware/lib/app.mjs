@@ -36,13 +36,13 @@ export function createApp(
   const limiter = new LoginLimiter();
   usersApi.register(router, { limiter, secureCookie });
   eventsApi.register(router);
-  workflowApi.register(router);
-  boardApi.register(router);
   blogApi.register(router);
   const store = new FileStore(filesDir, maxUploadMb * 1024 * 1024);
   const pusher = push ? new Pusher(db, { subject: pushSubject, fetchImpl: pushFetch, log }) : null;
+  workflowApi.register(router, { pusher });
+  boardApi.register(router, { pusher });
   chatApi.register(router, { store, pusher });
-  pollsApi.register(router);
+  pollsApi.register(router, { pusher });
   templatesApi.register(router, { store });
   pushApi.register(router, { pusher });
 
