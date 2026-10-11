@@ -11,6 +11,7 @@ import * as pollsApi from './api/polls.mjs';
 import * as pushApi from './api/push.mjs';
 import { FileStore } from './files.mjs';
 import { Pusher } from './push.mjs';
+import { runReminders } from './reminders.mjs';
 import * as templatesApi from './api/templates.mjs';
 import * as usersApi from './api/users.mjs';
 import * as workflowApi from './api/workflow.mjs';
@@ -48,7 +49,7 @@ export function createApp(
 
   const auditStmt = db.prepare('INSERT INTO audit_log (user_id, action, target) VALUES (?, ?, ?)');
 
-  return async function handle(req, res) {
+  async function handle(req, res) {
     const url = new URL(req.url, 'http://localhost');
     const { pathname } = url;
     try {
@@ -126,5 +127,8 @@ export function createApp(
       log.error(err);
       if (!res.headersSent) sendJson(res, 500, { error: 'サーバーでエラーが発生しました' });
     }
-  };
+  }
+  // 定期実行用（server.mjs から呼ぶ）
+  handle.runReminders = (now) => runReminders(db, pusher, now);
+  return handle;
 }

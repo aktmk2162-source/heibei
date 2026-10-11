@@ -7,11 +7,13 @@ import { join } from 'node:path';
 import { after, before, describe, test } from 'node:test';
 import { bootstrapAdmin, createApp } from '../lib/app.mjs';
 import { encryptPayload } from '../lib/push.mjs';
+import { businessDaysBetween } from '../lib/reminders.mjs';
 import { openDb } from '../lib/db.mjs';
 
 let server;
 let base;
 let db;
+let app;
 let filesDir;
 // プッシュサービスの代わりに送信内容を記録する
 const pushed = [];
@@ -66,7 +68,8 @@ before(async () => {
   assert.ok(boot);
   assert.equal(bootstrapAdmin(db), null, '2回目は作成しない');
   filesDir = mkdtempSync(join(tmpdir(), 'gw-files-'));
-  server = createServer(createApp(db, { filesDir, maxUploadMb: 1, pushFetch: fakePush, log: { error: () => {} } }));
+  app = createApp(db, { filesDir, maxUploadMb: 1, pushFetch: fakePush, log: { error: () => {} } });
+  server = createServer(app);
   await new Promise((r) => server.listen(0, '127.0.0.1', r));
   base = `http://127.0.0.1:${server.address().port}`;
   admin = await activate(new Client(), 'admin', 'Initial-Pass1');
@@ -737,5 +740,74 @@ describe('業務の通知（承認・日程調整・ToDo）', () => {
     assert.equal(got.length, 0, '自分のToDoは通知しない');
     got = await received(() => ids.satoClient.req('PUT', `/api/todos/${tid}`, { done: true }));
     assert.deepEqual(got.map(([w, m]) => [w, m.title]), [['yamada', '依頼した ToDo が完了しました']]);
+  });
+});
+
+describe('承認待ちの督促', () => {
+  const at = (s) => new Date(s.replace(' ', 'T'));
+  let rid;
+  const step = () => db.prepare('SELECT * FROM request_steps WHERE request_id = ? AND step_no = 1').get(rid);
+  const flush = () => new Promise((r) => setTimeout(r, 80));
+
+  before(async () => {
+    // 他のテストで残った承認待ちを片付けて、この申請だけを対象にする
+    db.prepare("UPDATE requests SET status = 'withdrawn' WHERE status = 'pending'").run();
+    rid = (await ids.yamadaClient.req('POST', '/api/requests', { type: '稟議', title: '広告出稿', approver_ids: [ids.sato] })).data.id;
+    assert.ok(step().arrived_at, '承認者に回った日時を記録');
+    // 2026-10-05（月）10:00 に回ってきたことにする
+    db.prepare("UPDATE request_steps SET arrived_at = '2026-10-05 10:00:00' WHERE request_id = ?").run(rid);
+  });
+
+  test('営業日の数え方（土日を除く）', () => {
+    assert.equal(businessDaysBetween(at('2026-10-09 17:00'), at('2026-10-12 10:00')), 0, '金→月の朝はまだ0日');
+    assert.equal(businessDaysBetween(at('2026-10-09 17:00'), at('2026-10-12 18:00')), 1);
+    assert.equal(businessDaysBetween(at('2026-10-05 10:00'), at('2026-10-07 10:00')), 2);
+  });
+
+  test('2営業日たつと承認者へ督促し、翌営業日に再督促する', async () => {
+    pushed.length = 0;
+    assert.equal(app.runReminders(at('2026-10-06 10:00')), 0, '1営業日では送らない');
+    assert.equal(app.runReminders(at('2026-10-07 20:00')), 0, '業務時間外は送らない');
+    assert.equal(app.runReminders(at('2026-10-07 10:00')), 1);
+    await flush();
+    assert.equal(pushed.length, 1);
+    assert.equal(step().remind_count, 1);
+    assert.equal(step().reminded_at, '2026-10-07 10:00:00');
+    assert.equal(app.runReminders(at('2026-10-07 15:00')), 0, '同じ日には再送しない');
+    assert.equal(app.runReminders(at('2026-10-10 10:00')), 0, '土曜は送らない');
+    assert.equal(app.runReminders(at('2026-10-08 10:00')), 1, '翌営業日に再督促');
+    assert.equal(step().remind_count, 2);
+  });
+
+  test('管理者が設定を変えられ、無効にすると送らない', async () => {
+    assert.equal((await ids.satoClient.req('PUT', '/api/admin/reminders', { enabled: false })).status, 403);
+    const bad = await admin.req('PUT', '/api/admin/reminders', { enabled: true, after_days: 2, repeat_days: 1, start_hour: 18, end_hour: 9 });
+    assert.equal(bad.status, 400);
+    await admin.req('PUT', '/api/admin/reminders', { enabled: false, after_days: 3, repeat_days: 2, start_hour: 8, end_hour: 20 });
+    assert.deepEqual((await admin.req('GET', '/api/admin/reminders')).data, { enabled: 0, after_days: 3, repeat_days: 2, start_hour: 8, end_hour: 20 });
+    assert.equal(app.runReminders(at('2026-10-15 10:00')), 0);
+    await admin.req('PUT', '/api/admin/reminders', { enabled: true, after_days: 2, repeat_days: 1, start_hour: 9, end_hour: 18 });
+  });
+
+  test('申請者は手動で催促できる（12時間に1回まで）', async () => {
+    db.prepare('UPDATE request_steps SET reminded_at = NULL WHERE request_id = ?').run(rid);
+    pushed.length = 0;
+    assert.equal((await ids.satoClient.req('POST', `/api/requests/${rid}/remind`)).status, 400, '申請者以外は不可');
+    assert.equal((await ids.yamadaClient.req('POST', `/api/requests/${rid}/remind`)).status, 200);
+    await flush();
+    assert.equal(pushed.length, 1);
+    assert.equal((await ids.yamadaClient.req('POST', `/api/requests/${rid}/remind`)).status, 429);
+    const d = (await ids.yamadaClient.req('GET', `/api/requests/${rid}`)).data;
+    assert.equal(d.steps[0].remind_count, 3);
+    const list = (await ids.satoClient.req('GET', '/api/requests?box=todo')).data;
+    assert.equal(list[0].waiting_since, '2026-10-05 10:00:00');
+  });
+
+  test('承認されて次の段階に進むと、その段階の経過日数は回ってきた時点から数える', async () => {
+    const adminId = (await admin.req('GET', '/api/me')).data.id;
+    const r2 = (await ids.yamadaClient.req('POST', '/api/requests', { type: '稟議', title: '2段階', approver_ids: [ids.sato, adminId] })).data.id;
+    assert.equal(db.prepare('SELECT arrived_at FROM request_steps WHERE request_id = ? AND step_no = 2').get(r2).arrived_at, null);
+    await ids.satoClient.req('POST', `/api/requests/${r2}/act`, { action: 'approve' });
+    assert.ok(db.prepare('SELECT arrived_at FROM request_steps WHERE request_id = ? AND step_no = 2').get(r2).arrived_at);
   });
 });

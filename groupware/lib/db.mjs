@@ -256,6 +256,10 @@ function migrate(db) {
     db.exec('ALTER TABLE todos ADD COLUMN created_by INTEGER REFERENCES users(id) ON DELETE SET NULL');
     db.exec('UPDATE todos SET created_by = user_id');
   }
+  // 督促のため、各承認段階に「回ってきた日時」「最後に督促した日時」を持つ
+  if (!cols('request_steps').includes('arrived_at')) db.exec('ALTER TABLE request_steps ADD COLUMN arrived_at TEXT');
+  if (!cols('request_steps').includes('reminded_at')) db.exec('ALTER TABLE request_steps ADD COLUMN reminded_at TEXT');
+  if (!cols('request_steps').includes('remind_count')) db.exec('ALTER TABLE request_steps ADD COLUMN remind_count INTEGER NOT NULL DEFAULT 0');
   if (!cols('chat_members').includes('muted')) db.exec('ALTER TABLE chat_members ADD COLUMN muted INTEGER NOT NULL DEFAULT 0');
   if (!cols('todos').includes('memo')) db.exec("ALTER TABLE todos ADD COLUMN memo TEXT NOT NULL DEFAULT ''");
 }

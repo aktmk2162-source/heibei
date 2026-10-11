@@ -1,7 +1,8 @@
 // ワークフロー（稟議・各種申請）。承認者を順番に回す直列承認。
 import { tx } from '../db.mjs';
 import { fail } from '../http.mjs';
-import { ids, int, str } from '../validate.mjs';
+import { MANUAL_INTERVAL_HOURS, parseLocal, pendingRow, reminderSettings, saveReminderSettings, sendReminder } from '../reminders.mjs';
+import { bool, ids, int, str } from '../validate.mjs';
 
 export const REQUEST_TYPES = ['稟議', '経費精算', '休暇申請', '出張申請', '購買申請', 'その他'];
 const MAX_STEPS = 6;
@@ -26,8 +27,11 @@ function requestFields(c) {
 }
 
 function insertSteps(db, requestId, approverIds) {
-  const ins = db.prepare('INSERT INTO request_steps (request_id, step_no, approver_id) VALUES (?, ?, ?)');
-  approverIds.forEach((uid, i) => ins.run(requestId, i + 1, uid));
+  const ins = db.prepare(
+    `INSERT INTO request_steps (request_id, step_no, approver_id, arrived_at)
+     VALUES (?, ?, ?, CASE WHEN ? = 1 THEN datetime('now','localtime') END)`,
+  );
+  approverIds.forEach((uid, i) => ins.run(requestId, i + 1, uid, i + 1));
 }
 
 function loadRequest(db, id, user) {
@@ -39,7 +43,8 @@ function loadRequest(db, id, user) {
   if (!req) fail(404, '申請が見つかりません');
   const steps = db
     .prepare(
-      `SELECT s.step_no, s.approver_id, s.status, s.comment, s.acted_at, u.name approver_name
+      `SELECT s.step_no, s.approver_id, s.status, s.comment, s.acted_at, s.arrived_at, s.reminded_at, s.remind_count,
+              u.name approver_name
          FROM request_steps s JOIN users u ON u.id = s.approver_id
         WHERE s.request_id = ? ORDER BY s.step_no`,
     )
@@ -61,6 +66,8 @@ const LIST_SQL = `
          a.name applicant_name,
          (SELECT u.name FROM request_steps s JOIN users u ON u.id = s.approver_id
            WHERE s.request_id = r.id AND s.step_no = r.current_step) current_approver_name,
+         (SELECT COALESCE(s.arrived_at, r.updated_at) FROM request_steps s
+           WHERE s.request_id = r.id AND s.step_no = r.current_step) waiting_since,
          (SELECT COUNT(*) FROM request_steps s WHERE s.request_id = r.id) step_count
     FROM requests r JOIN users a ON a.id = r.applicant_id`;
 
@@ -181,7 +188,12 @@ export function register(r, { pusher } = {}) {
       let next = req.current_step;
       if (action === 'approve') {
         if (req.current_step >= req.steps.length) status = 'approved';
-        else next++;
+        else {
+          next++;
+          c.db
+            .prepare(`UPDATE request_steps SET arrived_at = datetime('now','localtime') WHERE request_id = ? AND step_no = ?`)
+            .run(id, next);
+        }
       } else status = action === 'reject' ? 'rejected' : 'returned';
       c.db
         .prepare(`UPDATE requests SET status = ?, current_step = ?, updated_at = datetime('now','localtime') WHERE id = ?`)
@@ -191,6 +203,42 @@ export function register(r, { pusher } = {}) {
     notifyRequest(c.db, id, action, c.user.name, comment);
     return loadRequest(c.db, id, c.user);
   });
+
+  // 申請者による手動の催促（同じ承認者へは12時間に1回まで）
+  r.add('POST', '/api/requests/:id/remind', (c) => {
+    const id = int(c.params.id, 'ID', { required: true });
+    const req = loadRequest(c.db, id, c.user);
+    if (req.applicant_id !== c.user.id || req.status !== 'pending') fail(400, '承認待ちの自分の申請のみ催促できます');
+    const row = pendingRow(c.db, id);
+    if (row.reminded_at && Date.now() - parseLocal(row.reminded_at).getTime() < MANUAL_INTERVAL_HOURS * 3600 * 1000) {
+      fail(429, `催促は${MANUAL_INTERVAL_HOURS}時間に1回までです`);
+    }
+    sendReminder(c.db, pusher, row, new Date(), true);
+    c.audit('request_reminded', `#${id}`);
+    return { ok: true };
+  });
+
+  // 管理: 自動督促の設定
+  r.add('GET', '/api/admin/reminders', (c) => reminderSettings(c.db), { admin: true });
+
+  r.add(
+    'PUT',
+    '/api/admin/reminders',
+    (c) => {
+      const s = {
+        enabled: bool(c.body.enabled) ? 1 : 0,
+        after_days: int(c.body.after_days, '督促までの日数', { required: true, min: 1, max: 30 }),
+        repeat_days: int(c.body.repeat_days, '再督促の間隔', { required: true, min: 1, max: 30 }),
+        start_hour: int(c.body.start_hour, '送信開始時刻', { required: true, min: 0, max: 23 }),
+        end_hour: int(c.body.end_hour, '送信終了時刻', { required: true, min: 1, max: 24 }),
+      };
+      if (s.end_hour <= s.start_hour) fail(400, '送信時間帯の終了は開始より後にしてください');
+      saveReminderSettings(c.db, s);
+      c.audit('reminder_settings', JSON.stringify(s));
+      return s;
+    },
+    { admin: true },
+  );
 
   r.add('POST', '/api/requests/:id/withdraw', (c) => {
     const id = int(c.params.id, 'ID', { required: true });

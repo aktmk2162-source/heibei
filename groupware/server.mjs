@@ -32,6 +32,15 @@ const handle = createApp(db, {
 
 purgeExpiredSessions(db);
 setInterval(() => purgeExpiredSessions(db), 60 * 60 * 1000).unref();
+// 承認待ちの督促を10分ごとに確認（送るのは設定した平日の時間帯のみ）
+setInterval(() => {
+  try {
+    const n = handle.runReminders();
+    if (n) console.log(`承認待ちの督促を ${n} 件送信しました`);
+  } catch (err) {
+    console.error(err);
+  }
+}, 10 * 60 * 1000).unref();
 
 const server = createServer(handle);
 server.listen(port, host, () => console.log(`グループウェアを起動しました: http://localhost:${port}/`));

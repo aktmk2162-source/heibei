@@ -685,6 +685,17 @@ function openEventForm({ event, copy = false, date, participants, facilities }) 
 }
 
 // ================= ワークフロー =================
+// 承認待ちの経過日数（2日以上は強調）
+function waitingDays(since) {
+  if (!since) return 0;
+  return Math.floor((parseYmd(today()) - parseYmd(since.slice(0, 10))) / 86400000);
+}
+function waitingBadge(since) {
+  const d = waitingDays(since);
+  if (d < 1) return null;
+  return h('span', { class: `small ${d >= 2 ? 'overdue' : 'muted'}` }, ` ${d}日経過`);
+}
+
 const STATUS_LABEL = { pending: '承認待ち', approved: '承認済み', rejected: '却下', returned: '差し戻し', withdrawn: '取り下げ' };
 const statusBadge = (s) => h('span', { class: `status ${s}` }, STATUS_LABEL[s] || s);
 
@@ -707,7 +718,7 @@ async function pageWorkflow() {
                 h('td', {}, r.applicant_name),
                 h('td', { style: 'text-align:right' }, yen(r.amount)),
                 h('td', {}, statusBadge(r.status), r.status === 'pending' ? h('span', { class: 'muted small' }, ` ${r.current_step}/${r.step_count}`) : null),
-                h('td', {}, r.status === 'pending' ? r.current_approver_name : '—'),
+                h('td', {}, r.status === 'pending' ? [r.current_approver_name, waitingBadge(r.waiting_since)] : '—'),
                 h('td', { class: 'small muted', style: 'white-space:nowrap' }, r.updated_at.slice(0, 16)),
               ),
             )),
@@ -794,6 +805,11 @@ async function pageWorkflowDetail(id) {
               h('b', {}, s.approver_name),
               s.status === 'waiting' ? h('span', { class: 'muted small' }, r.status === 'pending' && s.step_no === r.current_step ? '承認待ち' : '未処理') : statusBadge(s.status),
               s.acted_at ? h('span', { class: 'muted small' }, s.acted_at.slice(0, 16)) : null,
+              r.status === 'pending' && s.step_no === r.current_step
+                ? h('span', { class: 'small' },
+                    waitingBadge(s.arrived_at || r.updated_at),
+                    s.remind_count ? h('span', { class: 'muted' }, `　督促 ${s.remind_count}回（最終 ${s.reminded_at.slice(5, 16).replace('-', '/')}）`) : null)
+                : null,
               s.comment ? h('div', { class: 'pre small', style: 'width:100%;padding-left:60px' }, `💬 ${s.comment}`) : null,
             ),
           ),
@@ -814,6 +830,15 @@ async function pageWorkflowDetail(id) {
     r.can_withdraw || r.can_resubmit
       ? h('div', { class: 'row' },
           r.can_resubmit ? h('button', { class: 'primary', onclick: () => go(`#/workflow/${id}/edit`) }, '修正して再申請') : null,
+          r.status === 'pending' && r.applicant_id === state.me.id
+            ? h('button', { onclick: guard(async () => {
+                const cur = r.steps.find((x) => x.step_no === r.current_step);
+                if (!(await confirmDialog(`${cur.approver_name}さんに承認を催促する通知を送りますか？`, '催促する'))) return;
+                await api('POST', `/api/requests/${id}/remind`);
+                toast('催促の通知を送りました');
+                route();
+              }) }, '🔔 承認を催促する')
+            : null,
           r.can_withdraw ? h('button', { class: 'danger', onclick: guard(async () => {
             if (!(await confirmDialog('この申請を取り下げますか？', '取り下げ', true))) return;
             await api('POST', `/api/requests/${id}/withdraw`);
@@ -1866,13 +1891,14 @@ async function pageSettings() {
 // ================= システム管理 =================
 async function pageAdmin() {
   const tab = query().get('tab') || 'users';
-  const tabs = [['users', 'ユーザー'], ['departments', '部署'], ['facilities', '施設'], ['data', 'データ移行'], ['audit', '操作ログ']];
+  const tabs = [['users', 'ユーザー'], ['departments', '部署'], ['facilities', '施設'], ['reminders', '督促設定'], ['data', 'データ移行'], ['audit', '操作ログ']];
   const content = await {
     users: adminUsers,
     departments: adminDepartments,
     facilities: adminFacilities,
     data: adminData,
     audit: adminAudit,
+    reminders: adminReminders,
   }[tab]?.();
   shell([
     h('h1', {}, 'システム管理'),
@@ -2075,12 +2101,43 @@ async function adminData() {
   );
 }
 
+async function adminReminders() {
+  const s = await api('GET', '/api/admin/reminders');
+  const enabled = h('input', { type: 'checkbox', checked: !!s.enabled });
+  const num = (v, min, max) => h('input', { type: 'number', min, max, value: v, style: 'width:80px' });
+  const after = num(s.after_days, 1, 30);
+  const repeat = num(s.repeat_days, 1, 30);
+  const start = num(s.start_hour, 0, 23);
+  const end = num(s.end_hour, 1, 24);
+  const err = h('div');
+  return h('div', { class: 'card', style: 'max-width:640px' },
+    h('h2', {}, '承認待ちの自動督促'),
+    h('p', { class: 'small muted' }, '承認が止まっている申請について、現在の承認者へ自動で通知します。土日は日数に含めず、通知も送りません。申請者は申請画面の「承認を催促する」から手動で催促することもできます（12時間に1回まで）。'),
+    err,
+    h('label', { class: 'check', style: 'margin-bottom:12px' }, enabled, '自動督促を行う'),
+    h('div', { class: 'row', style: 'margin-bottom:10px' }, '承認者に回ってから', after, '営業日たっても未処理なら督促する'),
+    h('div', { class: 'row', style: 'margin-bottom:10px' }, 'その後も未処理なら', repeat, '営業日ごとに再度督促する'),
+    h('div', { class: 'row', style: 'margin-bottom:16px' }, '送信する時間帯（平日）', start, '時 〜', end, '時'),
+    h('button', { class: 'primary', onclick: guard(async () => {
+      err.replaceChildren();
+      try {
+        await api('PUT', '/api/admin/reminders', {
+          enabled: enabled.checked, after_days: Number(after.value), repeat_days: Number(repeat.value), start_hour: Number(start.value), end_hour: Number(end.value),
+        });
+        toast('督促設定を保存しました');
+      } catch (e) {
+        err.replaceChildren(h('div', { class: 'alert error' }, e.message));
+      }
+    }) }, '保存'),
+  );
+}
+
 async function adminAudit() {
   const rows = await api('GET', '/api/admin/audit');
   const LABEL = {
     login: 'ログイン', login_failed: 'ログイン失敗', password_changed: 'パスワード変更', password_reset: 'パスワード初期化',
     user_created: 'ユーザー登録', user_updated: 'ユーザー更新', users_imported: 'ユーザー一括登録', events_imported: '予定一括取込',
-    request_submitted: '申請', request_resubmitted: '再申請', request_approve: '承認', request_reject: '却下', request_return: '差し戻し', request_withdrawn: '取り下げ',
+    request_submitted: '申請', request_resubmitted: '再申請', request_approve: '承認', request_reject: '却下', request_return: '差し戻し', request_withdrawn: '取り下げ', request_reminded: '催促', reminder_settings: '督促設定の変更',
   };
   return h('div', {},
     h('p', { class: 'muted small' }, '直近300件を表示しています。'),
