@@ -51,12 +51,14 @@ const yen = (n) => (n === null || n === undefined ? '' : `${Number(n).toLocaleSt
 
 function toast(msg, type = '') {
   const el = h('div', { class: type }, msg);
-  document.getElementById('toast').append(el);
+  const box = document.getElementById('toast');
+  box.append(el);
+  while (box.children.length > 3) box.firstElementChild.remove();
   setTimeout(() => el.remove(), type === 'error' ? 5000 : 2500);
 }
 
 // ================= API =================
-const state = { me: null, users: [], departments: [], facilities: [], types: [], counts: { approvals: 0, unread: 0 } };
+const state = { me: null, users: [], departments: [], facilities: [], types: [], counts: { approvals: 0, unread: 0, chat: 0, polls: 0 }, chatTimer: null };
 
 class ApiError extends Error {
   constructor(status, data) {
@@ -106,10 +108,14 @@ async function loadMasters() {
 const userName = (id) => state.users.find((u) => u.id === id)?.name ?? '（退職者等）';
 const facilityName = (id) => state.facilities.find((f) => f.id === id)?.name ?? '（廃止施設）';
 
+function setCounts(d) {
+  state.counts = { approvals: d.approvals, unread: d.unread.length, chat: d.chat_unread, polls: d.polls_unanswered };
+}
+
 async function refreshCounts() {
   try {
     const d = await api('GET', `/api/dashboard?today=${today()}`);
-    state.counts = { approvals: d.approvals, unread: d.unread.length };
+    setCounts(d);
     document.querySelectorAll('[data-badge]').forEach((el) => {
       const n = state.counts[el.dataset.badge];
       el.textContent = n || '';
@@ -306,8 +312,11 @@ const NAV = [
   ['#/home', 'ホーム'],
   ['#/schedule', 'スケジュール'],
   ['#/facility', '施設予約'],
+  ['#/poll', '日程調整', 'polls'],
   ['#/workflow', 'ワークフロー', 'approvals'],
   ['#/board', '掲示板', 'unread'],
+  ['#/blog', 'ブログ'],
+  ['#/chat', 'チャット', 'chat'],
   ['#/todo', 'ToDo'],
   ['#/settings', '個人設定'],
 ];
@@ -353,7 +362,7 @@ function go(path, params) {
 // ================= ホーム =================
 async function pageHome() {
   const d = await api('GET', `/api/dashboard?today=${today()}`);
-  state.counts = { approvals: d.approvals, unread: d.unread.length };
+  setCounts(d);
   const t = parseYmd(d.today);
   shell([
     h('h1', {}, `${t.getMonth() + 1}月${t.getDate()}日（${WD[t.getDay()]}）`),
@@ -361,6 +370,8 @@ async function pageHome() {
       h('a', { href: '#/workflow?box=todo' }, '承認待ち', h('b', {}, d.approvals)),
       h('a', { href: '#/workflow?box=mine' }, '自分の申請（処理中）', h('b', {}, d.my_pending)),
       h('a', { href: '#/board' }, '未読のお知らせ', h('b', {}, d.unread.length)),
+      h('a', { href: '#/chat' }, 'チャット未読', h('b', {}, d.chat_unread)),
+      h('a', { href: '#/poll' }, '日程調整の未回答', h('b', {}, d.polls_unanswered)),
       h('a', { href: '#/todo' }, '未完了の ToDo', h('b', {}, d.todos.length)),
     ),
     h('div', { class: 'grid-2' },
@@ -387,7 +398,7 @@ async function pageHome() {
       h('div', { class: 'card' },
         h('h2', {}, 'ToDo'),
         d.todos.length
-          ? d.todos.map((t) => h('div', { class: 'todo-item' }, h('span', { class: 'title' }, t.title), dueLabel(t.due_date)))
+          ? d.todos.map((t) => h('div', { class: 'todo-item' }, h('span', { class: 'title' }, t.title, t.created_by !== state.me.id ? h('span', { class: 'muted small' }, `（${t.requester_name}さんから依頼）`) : null), dueLabel(t.due_date)))
           : h('div', { class: 'empty' }, '未完了の ToDo はありません'),
         h('a', { href: '#/todo' }, 'ToDo を開く →'),
       ),
@@ -891,29 +902,593 @@ async function pageBoardForm(id) {
 
 // ================= ToDo =================
 async function pageTodo() {
-  const todos = await api('GET', '/api/todos');
+  const box = query().get('box') || 'mine';
+  const todos = await api('GET', `/api/todos?box=${box}`);
   const title = h('input', { type: 'text', placeholder: 'やること', maxlength: 200, style: 'flex:1;min-width:200px' });
   const due = h('input', { type: 'date' });
+  const assignee = h('select', { 'aria-label': '担当者' },
+    h('option', { value: state.me.id }, '自分'),
+    state.users.filter((u) => u.id !== state.me.id).map((u) => h('option', { value: u.id }, `${u.name}に依頼`)),
+  );
   const add = guard(async (e) => {
     e?.preventDefault();
-    await api('POST', '/api/todos', { title: title.value, due_date: due.value || null });
+    await api('POST', '/api/todos', { title: title.value, due_date: due.value || null, assignee_id: Number(assignee.value) });
+    toast(Number(assignee.value) === state.me.id ? '追加しました' : '依頼しました');
     route();
   });
+  const editTodo = (t) => {
+    const err = h('div');
+    const ti = h('input', { type: 'text', value: t.title, maxlength: 200 });
+    const du = h('input', { type: 'date', value: t.due_date || '' });
+    const me = h('textarea', { maxlength: 2000, style: 'min-height:80px' }, t.memo || '');
+    const close = openModal('ToDo の編集', h('div', {}, err,
+      h('p', { class: 'small muted' }, `担当: ${t.assignee_name}　依頼者: ${t.requester_name || '—'}`),
+      field('内容', ti, true), field('期限', du), field('メモ', me)), [
+      h('div', { class: 'left' }, h('button', { class: 'danger', onclick: guard(async () => {
+        if (!(await confirmDialog('この ToDo を削除しますか？', '削除', true))) return;
+        await api('DELETE', `/api/todos/${t.id}`);
+        close();
+        route();
+      }) }, '削除')),
+      h('button', { onclick: () => close() }, 'キャンセル'),
+      h('button', { class: 'primary', onclick: guard(async () => {
+        try {
+          await api('PUT', `/api/todos/${t.id}`, { title: ti.value, due_date: du.value || null, memo: me.value });
+          close();
+          route();
+        } catch (e) {
+          err.replaceChildren(h('div', { class: 'alert error' }, e.message));
+        }
+      }) }, '保存'),
+    ]);
+  };
   shell([
     h('h1', {}, 'ToDo'),
-    h('form', { class: 'card row', onsubmit: add }, title, h('span', { class: 'small muted' }, '期限'), due, h('button', { class: 'primary', type: 'submit' }, '追加')),
+    h('div', { class: 'tabs' },
+      h('a', { href: '#/todo?box=mine', class: box === 'mine' ? 'active' : '' }, '自分の ToDo'),
+      h('a', { href: '#/todo?box=requested', class: box === 'requested' ? 'active' : '' }, '依頼した ToDo'),
+    ),
+    h('form', { class: 'card row', onsubmit: add }, title, h('span', { class: 'small muted' }, '期限'), due, assignee, h('button', { class: 'primary', type: 'submit' }, '追加')),
     h('div', { class: 'card' },
       todos.length
         ? todos.map((t) =>
             h('div', { class: `todo-item${t.done ? ' done' : ''}` },
               h('input', { type: 'checkbox', checked: t.done, 'aria-label': '完了', onchange: guard(async (e) => (await api('PUT', `/api/todos/${t.id}`, { done: e.target.checked }), route())) }),
-              h('span', { class: 'title' }, t.title),
+              h('span', { class: 'title' },
+                t.title,
+                box === 'requested' ? h('span', { class: 'muted small' }, `（担当: ${t.assignee_name}）`) : t.created_by && t.created_by !== state.me.id ? h('span', { class: 'muted small' }, `（${t.requester_name}さんから依頼）`) : null,
+                t.memo ? h('div', { class: 'muted small pre' }, t.memo) : null,
+              ),
               t.done ? null : dueLabel(t.due_date),
-              h('button', { class: 'small danger', onclick: guard(async () => (await api('DELETE', `/api/todos/${t.id}`), route())) }, '削除'),
+              h('button', { class: 'small', onclick: () => editTodo(t) }, '編集'),
             ),
           )
-        : h('div', { class: 'empty' }, 'ToDo はありません'),
+        : h('div', { class: 'empty' }, box === 'mine' ? 'ToDo はありません' : '他の人に依頼した ToDo はありません'),
     ),
+  ]);
+}
+
+// ================= ブログ =================
+async function pageBlog() {
+  const q = query();
+  const word = q.get('q') || '';
+  const author = q.get('author') || '';
+  const params = new URLSearchParams();
+  if (word) params.set('q', word);
+  if (author) params.set('author', author);
+  const blogs = await api('GET', `/api/blogs?${params}`);
+  const search = h('input', { type: 'search', value: word, placeholder: 'キーワードで検索', style: 'min-width:200px' });
+  const who = h('select', {}, h('option', { value: '' }, '全員の記事'), state.users.map((u) => h('option', { value: u.id, selected: String(u.id) === author }, u.name)));
+  const apply = (e) => {
+    e?.preventDefault();
+    const p = {};
+    if (search.value.trim()) p.q = search.value.trim();
+    if (who.value) p.author = who.value;
+    go('#/blog', p);
+  };
+  who.addEventListener('change', apply);
+  shell([
+    h('div', { class: 'row between' }, h('h1', {}, 'ブログ'), h('button', { class: 'primary', onclick: () => go('#/blog/new') }, '＋ 記事を書く')),
+    h('form', { class: 'row', style: 'margin-bottom:16px', onsubmit: apply }, search, who, h('button', { type: 'submit' }, '検索')),
+    blogs.length
+      ? blogs.map((b) =>
+          h('a', { class: 'card blog-card', href: `#/blog/${b.id}` },
+            h('h2', {}, b.title),
+            h('p', { class: 'muted small' }, `${b.author_name || '—'}　${b.created_at.slice(0, 16)}`),
+            h('p', { class: 'excerpt' }, b.excerpt.replace(/\s+/g, ' '), b.excerpt.length >= 120 ? '…' : ''),
+            h('div', { class: 'small muted' }, `${b.liked ? '❤' : '♡'} いいね ${b.likes}　💬 コメント ${b.comments}`),
+          ),
+        )
+      : h('div', { class: 'card empty' }, word || author ? '該当する記事はありません' : 'まだ記事がありません。最初の記事を書いてみましょう'),
+  ]);
+}
+
+async function pageBlogDetail(id) {
+  const b = await api('GET', `/api/blogs/${id}`);
+  const comment = h('textarea', { placeholder: 'コメントを書く', style: 'min-height:70px', maxlength: 2000 });
+  shell([
+    h('div', { class: 'row', style: 'margin-bottom:12px' }, h('a', { href: '#/blog' }, '← 一覧へ戻る')),
+    h('article', { class: 'card' },
+      h('h1', {}, b.title),
+      h('p', { class: 'muted small' },
+        h('a', { href: `#/blog?author=${b.author_id}` }, b.author_name || '—'),
+        `　${b.created_at.slice(0, 16)}${b.updated_at !== b.created_at ? `（更新 ${b.updated_at.slice(0, 16)}）` : ''}`,
+      ),
+      h('div', { class: 'pre blog-body' }, b.body),
+      h('div', { class: 'row', style: 'margin-top:16px' },
+        h('button', { class: b.liked ? 'primary' : '', onclick: guard(async () => (await api('POST', `/api/blogs/${id}/like`), route())) }, `${b.liked ? '❤' : '♡'} いいね ${b.likers.length}`),
+        b.likers.length ? h('span', { class: 'muted small' }, b.likers.join('、')) : null,
+        h('span', { class: 'spacer' }),
+        b.can_edit ? h('button', { onclick: () => go(`#/blog/${id}/edit`) }, '編集') : null,
+        b.can_edit ? h('button', { class: 'danger', onclick: guard(async () => {
+          if (!(await confirmDialog('この記事を削除しますか？', '削除', true))) return;
+          await api('DELETE', `/api/blogs/${id}`);
+          toast('削除しました');
+          go('#/blog');
+        }) }, '削除') : null,
+      ),
+    ),
+    h('div', { class: 'card' },
+      h('h2', {}, `コメント（${b.comments.length}）`),
+      b.comments.map((m) =>
+        h('div', { class: 'comment' },
+          h('div', { class: 'row small' }, h('b', {}, m.author_name || '—'), h('span', { class: 'muted' }, m.created_at.slice(0, 16)),
+            m.can_delete ? h('button', { class: 'link small', onclick: guard(async () => {
+              if (!(await confirmDialog('このコメントを削除しますか？', '削除', true))) return;
+              await api('DELETE', `/api/blog-comments/${m.id}`);
+              route();
+            }) }, '削除') : null),
+          h('div', { class: 'pre' }, m.body),
+        ),
+      ),
+      comment,
+      h('button', { class: 'primary', style: 'margin-top:8px', onclick: guard(async () => {
+        await api('POST', `/api/blogs/${id}/comments`, { body: comment.value });
+        route();
+      }) }, 'コメントする'),
+    ),
+  ]);
+}
+
+async function pageBlogForm(id) {
+  const b = id ? await api('GET', `/api/blogs/${id}`) : null;
+  const err = h('div');
+  const title = h('input', { type: 'text', value: b?.title || '', maxlength: 100 });
+  const body = h('textarea', { style: 'min-height:320px', maxlength: 30000 }, b?.body || '');
+  const submit = guard(async () => {
+    err.replaceChildren();
+    try {
+      const data = { title: title.value, body: body.value };
+      const r = b ? await api('PUT', `/api/blogs/${id}`, data) : await api('POST', '/api/blogs', data);
+      toast(b ? '更新しました' : '投稿しました');
+      go(`#/blog/${b ? id : r.id}`);
+    } catch (e) {
+      err.replaceChildren(h('div', { class: 'alert error' }, e.message));
+    }
+  });
+  shell([
+    h('h1', {}, b ? '記事の編集' : '記事を書く'),
+    h('div', { class: 'card', style: 'max-width:820px' },
+      err,
+      field('タイトル', title, true),
+      field('本文', body, true),
+      h('p', { class: 'muted small' }, '日々の業務の気づき、成功事例、物件・地域の情報、自己紹介など、社内で共有したいことを気軽に書いてください。'),
+      h('div', { class: 'row', style: 'margin-top:12px' }, h('button', { onclick: () => history.back() }, 'キャンセル'), h('button', { class: 'primary', onclick: submit }, b ? '更新する' : '投稿する')),
+    ),
+  ]);
+}
+
+// ================= チャット =================
+function chatRoomForm(room) {
+  const err = h('div');
+  const name = h('input', { type: 'text', value: room?.name || '', maxlength: 50 });
+  const picker = userPicker(room ? room.members.map((m) => m.id) : [state.me.id]);
+  const close = openModal(room ? 'グループの設定' : 'グループを作る',
+    h('div', {}, err, field('グループ名', name, true), h('div', { class: 'field' }, h('b', { class: 'small' }, 'メンバー（自分は自動で参加します）'), picker.el)),
+    [
+      h('button', { onclick: () => close() }, 'キャンセル'),
+      h('button', { class: 'primary', onclick: guard(async () => {
+        try {
+          const data = { name: name.value, member_ids: picker.value() };
+          if (room) {
+            await api('PUT', `/api/chat/rooms/${room.id}`, data);
+            close();
+            route();
+          } else {
+            const r = await api('POST', '/api/chat/rooms', data);
+            close();
+            go(`#/chat/${r.id}`);
+          }
+        } catch (e) {
+          err.replaceChildren(h('div', { class: 'alert error' }, e.message));
+        }
+      }) }, room ? '保存' : '作成'),
+    ],
+  );
+}
+
+function chatDirectForm() {
+  const search = h('input', { type: 'search', placeholder: '名前で絞り込み', style: 'width:100%;margin-bottom:8px' });
+  const list = h('div', { class: 'picker', style: 'max-height:360px' });
+  let close;
+  const render = () => {
+    const q = search.value.trim();
+    list.replaceChildren(
+      ...state.users
+        .filter((u) => u.id !== state.me.id && (!q || u.name.includes(q)))
+        .map((u) => h('button', { class: 'link', style: 'display:block;padding:6px 0;text-align:left;width:100%', onclick: guard(async () => {
+          const r = await api('POST', '/api/chat/direct', { user_id: u.id });
+          close();
+          go(`#/chat/${r.id}`);
+        }) }, u.name, u.department ? h('span', { class: 'muted small' }, `（${u.department}）`) : null)),
+    );
+  };
+  search.addEventListener('input', render);
+  render();
+  close = openModal('1対1で話す', h('div', {}, search, list));
+}
+
+async function pageChat(roomId) {
+  const roomList = h('div', { class: 'chat-rooms' });
+  const renderRooms = (rooms) => roomList.replaceChildren(
+    h('div', { class: 'row', style: 'padding:8px' },
+      h('button', { class: 'small primary', onclick: chatDirectForm }, '＋ 1対1'),
+      h('button', { class: 'small', onclick: () => chatRoomForm() }, '＋ グループ'),
+    ),
+    rooms.length
+      ? h('div', {}, rooms.map((r) =>
+          h('a', { href: `#/chat/${r.id}`, class: `chat-room${String(r.id) === roomId ? ' active' : ''}` },
+            h('div', { class: 'row between' },
+              h('b', {}, r.name, r.is_direct ? null : h('span', { class: 'muted small' }, ` (${r.member_count})`)),
+              r.unread ? h('span', { class: 'badge' }, r.unread) : null,
+            ),
+            h('div', { class: 'muted small ellipsis' }, r.last_body || 'メッセージはまだありません'),
+          ),
+        ))
+      : h('div', { class: 'empty', style: 'padding:12px' }, 'トークはまだありません'),
+  );
+  const loadRooms = async () => renderRooms(await api('GET', '/api/chat/rooms'));
+  await loadRooms();
+
+  if (!roomId) {
+    shell([h('h1', {}, 'チャット'), h('div', { class: 'chat' }, roomList, h('div', { class: 'chat-main empty-main' }, '左の一覧からトークを選ぶか、新しく始めてください'))]);
+    state.chatTimer = setInterval(() => loadRooms().catch(() => {}), 5000);
+    return;
+  }
+
+  const room = await api('GET', `/api/chat/rooms/${roomId}`);
+  const log = h('div', { class: 'chat-log' });
+  let lastId = 0;
+  let firstId = 0;
+  let lastDay = '';
+  const msgEl = (m) => {
+    const mine = m.user_id === state.me.id;
+    return h('div', { class: `msg${mine ? ' mine' : ''}`, 'data-id': m.id },
+      mine ? null : h('div', { class: 'who small' }, m.user_name || '（退職者等）'),
+      h('div', { class: 'bubble pre' }, m.body),
+      h('div', { class: 'meta small muted' }, m.created_at.slice(11, 16),
+        mine ? h('button', { class: 'link small', onclick: guard(async () => {
+          if (!(await confirmDialog('このメッセージを削除しますか？', '削除', true))) return;
+          await api('DELETE', `/api/chat/messages/${m.id}`);
+          route();
+        }) }, ' 削除') : null),
+    );
+  };
+  const appendMessages = (msgs) => {
+    const atBottom = log.scrollHeight - log.scrollTop - log.clientHeight < 60;
+    for (const m of msgs) {
+      const day = m.created_at.slice(0, 10);
+      if (day !== lastDay) {
+        log.append(h('div', { class: 'day-sep small muted' }, fmtDate(day)));
+        lastDay = day;
+      }
+      log.append(msgEl(m));
+      lastId = Math.max(lastId, m.id);
+      if (!firstId) firstId = m.id;
+    }
+    if (atBottom || msgs.some((m) => m.user_id === state.me.id)) log.scrollTop = log.scrollHeight;
+  };
+  const first = await api('GET', `/api/chat/rooms/${roomId}/messages`);
+  const more = h('button', { class: 'small', hidden: !first.has_more, onclick: guard(async () => {
+    const older = await api('GET', `/api/chat/rooms/${roomId}/messages?before=${firstId}`);
+    const h0 = log.scrollHeight;
+    const frag = document.createDocumentFragment();
+    let d = '';
+    for (const m of older.messages) {
+      const day = m.created_at.slice(0, 10);
+      if (day !== d) frag.append(h('div', { class: 'day-sep small muted' }, fmtDate(day)));
+      d = day;
+      frag.append(msgEl(m));
+    }
+    if (older.messages.length) firstId = older.messages[0].id;
+    log.prepend(frag);
+    log.prepend(more);
+    more.hidden = !older.has_more;
+    log.scrollTop = log.scrollHeight - h0;
+  }) }, 'さらに前を読み込む');
+  log.append(more);
+
+  const input = h('textarea', { class: 'chat-input', placeholder: 'メッセージを入力（Enter で送信、Shift+Enter で改行）', maxlength: 5000 });
+  const send = guard(async () => {
+    if (!input.value.trim()) return;
+    const body = input.value;
+    input.value = '';
+    try {
+      await api('POST', `/api/chat/rooms/${roomId}/messages`, { body });
+    } catch (e) {
+      input.value = body;
+      throw e;
+    }
+    await poll();
+  });
+  // 日本語入力の変換確定の Enter では送信しない
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && !e.shiftKey && !e.isComposing && e.keyCode !== 229) {
+      e.preventDefault();
+      send();
+    }
+  });
+  let polling = false;
+  const poll = async () => {
+    if (polling) return;
+    polling = true;
+    try {
+      const r = await api('GET', `/api/chat/rooms/${roomId}/messages?after=${lastId}`);
+      if (r.messages.length) appendMessages(r.messages);
+      // 他のトークの新着・未読も一覧に反映する
+      await loadRooms();
+    } catch {
+      /* 一時的な通信エラーは次回に再試行 */
+    } finally {
+      polling = false;
+    }
+  };
+
+  shell([
+    h('h1', {}, 'チャット'),
+    h('div', { class: 'chat' },
+      roomList,
+      h('div', { class: 'chat-main' },
+        h('div', { class: 'chat-head row between' },
+          h('div', {}, h('b', {}, room.name), room.is_direct ? null : h('span', { class: 'muted small' }, `　${room.members.map((m) => m.name).join('、')}`)),
+          room.is_direct
+            ? null
+            : h('div', { class: 'row' },
+                h('button', { class: 'small', onclick: () => chatRoomForm(room) }, '設定'),
+                h('button', { class: 'small danger', onclick: guard(async () => {
+                  if (!(await confirmDialog(`「${room.name}」から退出しますか？`, '退出', true))) return;
+                  await api('POST', `/api/chat/rooms/${roomId}/leave`);
+                  go('#/chat');
+                }) }, '退出'),
+              ),
+        ),
+        log,
+        h('div', { class: 'chat-send' }, input, h('button', { class: 'primary', onclick: send }, '送信')),
+      ),
+    ),
+  ]);
+  appendMessages(first.messages);
+  log.scrollTop = log.scrollHeight;
+  input.focus();
+  await loadRooms();
+  refreshCounts();
+  state.chatTimer = setInterval(poll, 4000);
+}
+
+// ================= 日程調整 =================
+const POLL_STATUS = { open: ['回答受付中', 'pending'], decided: ['決定済み', 'approved'], closed: ['中止', 'withdrawn'] };
+const ANS = { yes: '○', maybe: '△', no: '×' };
+
+async function pagePolls() {
+  const polls = await api('GET', '/api/polls');
+  shell([
+    h('div', { class: 'row between' }, h('h1', {}, '日程調整'), h('button', { class: 'primary', onclick: () => go('#/poll/new') }, '＋ 日程調整を作る')),
+    h('p', { class: 'muted small' }, '候補日時を出して参加者に ○△× で回答してもらい、決まった日時をそのままスケジュールに登録できます。'),
+    polls.length
+      ? h('div', { class: 'table-wrap' }, h('table', { class: 'list' },
+          h('thead', {}, h('tr', {}, ['件名', '主催者', '状況', '回答', '日時'].map((t) => h('th', {}, t)))),
+          h('tbody', {}, polls.map((p) =>
+            h('tr', { class: 'clickable', onclick: () => go(`#/poll/${p.id}`) },
+              h('td', { class: p.status === 'open' && p.my_answered === false && p.organizer_id !== state.me.id ? 'unread' : '' },
+                p.status === 'open' && p.my_answered === false && p.organizer_id !== state.me.id ? h('span', { class: 'dot' }) : null, p.title),
+              h('td', {}, p.organizer_name || '—'),
+              h('td', {}, h('span', { class: `status ${POLL_STATUS[p.status][1]}` }, POLL_STATUS[p.status][0])),
+              h('td', {}, `${p.answered_count}/${p.member_count}名`),
+              h('td', { class: 'small' }, p.decided_at ? `決定: ${fmtDateTime(p.decided_at)}` : p.first_slot ? `${fmtDateTime(p.first_slot)}〜` : '—'),
+            ),
+          )),
+        ))
+      : h('div', { class: 'card empty' }, '日程調整はありません'),
+  ]);
+}
+
+async function pagePollForm() {
+  const err = h('div');
+  const title = h('input', { type: 'text', maxlength: 100 });
+  const location_ = h('input', { type: 'text', maxlength: 100 });
+  const memo = h('textarea', { maxlength: 5000, style: 'min-height:80px' });
+  const picker = userPicker([state.me.id]);
+  const slotsBox = h('div');
+  const tomorrow = addDays(today(), 1);
+  const slots = [{ date: tomorrow, start: '10:00', end: '11:00' }];
+  const renderSlots = () =>
+    slotsBox.replaceChildren(
+      ...slots.map((s, i) =>
+        h('div', { class: 'dt', style: 'margin-bottom:6px' },
+          h('span', { class: 'muted small', style: 'width:48px' }, `候補${i + 1}`),
+          h('input', { type: 'date', value: s.date, onchange: (e) => (s.date = e.target.value) }),
+          h('input', { type: 'time', value: s.start, step: 300, onchange: (e) => (s.start = e.target.value) }),
+          '〜',
+          h('input', { type: 'time', value: s.end, step: 300, onchange: (e) => (s.end = e.target.value) }),
+          slots.length > 1 ? h('button', { type: 'button', class: 'small', onclick: () => (slots.splice(i, 1), renderSlots()) }, '削除') : null,
+        ),
+      ),
+      slots.length < 30
+        ? h('div', { class: 'row' },
+            h('button', { type: 'button', class: 'small', onclick: () => {
+              const last = slots[slots.length - 1];
+              slots.push({ ...last, date: addDays(last.date, 1) });
+              renderSlots();
+            } }, '＋ 翌日の同じ時間を追加'),
+            h('button', { type: 'button', class: 'small', onclick: () => {
+              const last = slots[slots.length - 1];
+              slots.push({ ...last });
+              renderSlots();
+            } }, '＋ 候補を追加'),
+          )
+        : null,
+    );
+  renderSlots();
+  const submit = guard(async () => {
+    err.replaceChildren();
+    try {
+      const r = await api('POST', '/api/polls', {
+        title: title.value,
+        location: location_.value,
+        memo: memo.value,
+        member_ids: picker.value(),
+        slots: slots.map((s) => ({ start_at: `${s.date} ${s.start}`, end_at: `${s.date} ${s.end}` })),
+      });
+      toast('日程調整を作成しました');
+      go(`#/poll/${r.id}`);
+    } catch (e) {
+      err.replaceChildren(h('div', { class: 'alert error' }, e.message));
+      window.scrollTo(0, 0);
+    }
+  });
+  shell([
+    h('h1', {}, '日程調整を作る'),
+    h('div', { class: 'card', style: 'max-width:820px' },
+      err,
+      field('件名', title, true),
+      h('div', { class: 'field' }, h('b', { class: 'small' }, '候補日時'), h('div', { style: 'margin-top:6px' }, slotsBox)),
+      h('div', { class: 'field', style: 'margin-top:12px' }, h('b', { class: 'small' }, '参加者（回答してもらう人）'), picker.el),
+      h('div', { style: 'margin-top:12px' }, field('場所', location_)),
+      field('メモ', memo),
+      h('div', { class: 'row', style: 'margin-top:12px' }, h('button', { onclick: () => history.back() }, 'キャンセル'), h('button', { class: 'primary', onclick: submit }, '作成する')),
+    ),
+  ]);
+}
+
+async function pagePollDetail(id) {
+  const p = await api('GET', `/api/polls/${id}`);
+  const key = (s, u) => `${s}:${u}`;
+  const mine = {};
+  for (const s of p.slots) mine[s.id] = p.answers[key(s.id, state.me.id)] || '';
+  const canAnswer = p.is_member && p.status === 'open';
+  const tally = (s) => {
+    const c = { yes: 0, maybe: 0, no: 0 };
+    for (const m of p.members) {
+      const a = p.answers[key(s.id, m.id)];
+      if (a) c[a]++;
+    }
+    return c;
+  };
+  const best = Math.max(0, ...p.slots.map((s) => tally(s).yes));
+  const myComment = h('input', { type: 'text', maxlength: 500, placeholder: 'コメント（任意）', value: p.members.find((m) => m.id === state.me.id)?.comment || '', style: 'flex:1;min-width:200px' });
+  const ansButtons = (s) =>
+    h('div', { class: 'ans-buttons' },
+      Object.entries(ANS).map(([v, label]) =>
+        h('button', { type: 'button', class: `ans ${v}${mine[s.id] === v ? ' on' : ''}`, onclick: (e) => {
+          mine[s.id] = v;
+          e.target.parentElement.querySelectorAll('button').forEach((b) => b.classList.toggle('on', b === e.target));
+        } }, label),
+      ),
+    );
+  const decide = (s) => {
+    const facSel = new Set();
+    const close = openModal('日時の決定',
+      h('div', {},
+        h('p', {}, `「${p.title}」を ${fmtDate(s.start_at.slice(0, 10))} ${s.start_at.slice(11)}〜${s.end_at.slice(11)} に決定し、参加者全員（${p.members.length}名）のスケジュールに登録します。`),
+        state.facilities.length
+          ? h('div', { class: 'field' }, h('b', { class: 'small' }, '施設も予約する場合は選択'),
+              h('div', { class: 'picker' }, state.facilities.map((f) => h('label', {}, h('input', { type: 'checkbox', onchange: (e) => (e.target.checked ? facSel.add(f.id) : facSel.delete(f.id)) }), f.name))))
+          : null,
+      ),
+      [
+        h('button', { onclick: () => close() }, 'キャンセル'),
+        h('button', { class: 'primary', onclick: guard(async () => {
+          await api('POST', `/api/polls/${id}/decide`, { slot_id: s.id, facility_ids: [...facSel] });
+          close();
+          toast('決定し、スケジュールに登録しました');
+          route();
+        }) }, '決定する'),
+      ],
+    );
+  };
+  const status = POLL_STATUS[p.status];
+  const decidedSlot = p.slots.find((s) => s.id === p.decided_slot_id);
+  shell([
+    h('div', { class: 'row', style: 'margin-bottom:12px' }, h('a', { href: '#/poll' }, '← 一覧へ戻る')),
+    h('div', { class: 'row', style: 'margin-bottom:8px' }, h('h1', { style: 'margin:0' }, p.title), h('span', { class: `status ${status[1]}` }, status[0])),
+    h('p', { class: 'muted small' }, `主催: ${p.organizer_name || '—'}${p.location ? `　場所: ${p.location}` : ''}`),
+    p.memo ? h('div', { class: 'card pre' }, p.memo) : null,
+    decidedSlot
+      ? h('div', { class: 'alert ok' }, `${fmtDate(decidedSlot.start_at.slice(0, 10))} ${decidedSlot.start_at.slice(11)}〜${decidedSlot.end_at.slice(11)} に決定しました。`,
+          p.event_id ? h('button', { class: 'link', onclick: () => openEventDetail(p.event_id) }, '　登録された予定を見る') : null)
+      : null,
+    h('div', { class: 'table-wrap' },
+      h('table', { class: 'list poll-table' },
+        h('thead', {}, h('tr', {},
+          h('th', {}, '候補日時'),
+          h('th', {}, '○ / △ / ×'),
+          canAnswer ? h('th', {}, 'あなたの回答') : null,
+          p.members.map((m) => h('th', { class: 'center' }, m.name)),
+          p.is_organizer && p.status === 'open' ? h('th', {}, '') : null,
+        )),
+        h('tbody', {}, p.slots.map((s) => {
+          const t = tally(s);
+          return h('tr', { class: s.id === p.decided_slot_id ? 'decided' : t.yes === best && best > 0 && p.status === 'open' ? 'best' : '' },
+            h('td', { style: 'white-space:nowrap' }, `${fmtDate(s.start_at.slice(0, 10))} ${s.start_at.slice(11)}〜${s.end_at.slice(11)}`),
+            h('td', { style: 'white-space:nowrap' }, `${t.yes} / ${t.maybe} / ${t.no}`),
+            canAnswer ? h('td', {}, ansButtons(s)) : null,
+            p.members.map((m) => {
+              const a = p.answers[key(s.id, m.id)];
+              return h('td', { class: `center ans-cell ${a || ''}` },
+                a ? ANS[a] : h('span', { class: 'muted' }, '—'),
+                p.busy[key(s.id, m.id)] ? h('div', { class: 'busy small' }, '予定あり') : null,
+              );
+            }),
+            p.is_organizer && p.status === 'open' ? h('td', {}, h('button', { class: 'small primary', onclick: () => decide(s) }, 'この日時に決定')) : null,
+          );
+        })),
+        h('tfoot', {}, h('tr', {},
+          h('td', { colspan: canAnswer ? 3 : 2, class: 'muted small' }, 'コメント'),
+          p.members.map((m) => h('td', { class: 'small' }, m.answered_at ? m.comment || '' : h('span', { class: 'muted' }, '未回答'))),
+          p.is_organizer && p.status === 'open' ? h('td', {}) : null,
+        )),
+      ),
+    ),
+    h('p', { class: 'muted small', style: 'margin-top:6px' }, '「予定あり」はその時間に既存の予定が入っていることを示します（内容は表示されません）。'),
+    canAnswer
+      ? h('div', { class: 'card row', style: 'margin-top:12px' },
+          myComment,
+          h('button', { class: 'primary', onclick: guard(async () => {
+            const answers = Object.fromEntries(Object.entries(mine).filter(([, v]) => v));
+            if (Object.keys(answers).length < p.slots.length) {
+              if (!(await confirmDialog('未回答の候補があります。このまま送信しますか？', '送信'))) return;
+            }
+            await api('PUT', `/api/polls/${id}/answer`, { answers, comment: myComment.value });
+            toast('回答しました');
+            refreshCounts();
+            route();
+          }) }, '回答を送信'),
+        )
+      : null,
+    p.is_organizer
+      ? h('div', { class: 'row', style: 'margin-top:12px' },
+          p.status === 'open' ? h('button', { onclick: guard(async () => {
+            if (!(await confirmDialog('この日程調整を中止しますか？', '中止する', true))) return;
+            await api('POST', `/api/polls/${id}/close`);
+            route();
+          }) }, '中止する') : null,
+          h('button', { class: 'danger', onclick: guard(async () => {
+            if (!(await confirmDialog('この日程調整を削除しますか？（登録済みの予定は残ります）', '削除', true))) return;
+            await api('DELETE', `/api/polls/${id}`);
+            go('#/poll');
+          }) }, '削除'),
+        )
+      : null,
   ]);
 }
 
@@ -1171,6 +1746,7 @@ async function adminAudit() {
 
 // ================= ルーティング =================
 async function route() {
+  clearInterval(state.chatTimer);
   if (!state.me) return renderLogin();
   if (state.me.must_change_password) {
     return $app().replaceChildren(h('div', { class: 'login-wrap' }, passwordForm(true)));
@@ -1192,6 +1768,16 @@ async function route() {
         if (parts[1]) return await pageBoardDetail(parts[1]);
         return await pageBoard();
       case 'todo': return await pageTodo();
+      case 'blog':
+        if (parts[1] === 'new') return await pageBlogForm();
+        if (parts[1] && parts[2] === 'edit') return await pageBlogForm(parts[1]);
+        if (parts[1]) return await pageBlogDetail(parts[1]);
+        return await pageBlog();
+      case 'chat': return await pageChat(parts[1]);
+      case 'poll':
+        if (parts[1] === 'new') return await pagePollForm();
+        if (parts[1]) return await pagePollDetail(parts[1]);
+        return await pagePolls();
       case 'settings': return await pageSettings();
       case 'admin':
         if (state.me.role === 'admin') return await pageAdmin();

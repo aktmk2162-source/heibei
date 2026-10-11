@@ -149,7 +149,7 @@ function facilityConflicts(db, facilityIds, start, end, exceptIds = []) {
     .all(...facilityIds, end, start, ...exceptIds);
 }
 
-function assertNoConflict(db, f, ranges, exceptIds) {
+export function assertNoConflict(db, f, ranges, exceptIds) {
   for (const [s, e] of ranges) {
     const hits = facilityConflicts(db, f.facilityIds, s, e, exceptIds);
     if (hits.length) {
@@ -159,7 +159,7 @@ function assertNoConflict(db, f, ranges, exceptIds) {
   }
 }
 
-function insertEvent(db, f, start, end, seriesId, userId) {
+export function insertEvent(db, f, start, end, seriesId, userId) {
   const { lastInsertRowid } = db
     .prepare(
       `INSERT INTO events (series_id, title, start_at, end_at, all_day, location, memo, visibility, created_by)

@@ -312,3 +312,132 @@ describe('掲示板・ToDo・ホーム', () => {
     assert.equal((await c.req('GET', '/api/me')).status, 401);
   });
 });
+
+describe('ToDo の依頼', () => {
+  test('他の社員に依頼でき、依頼者・担当者だけが扱える', async () => {
+    const t = await ids.yamadaClient.req('POST', '/api/todos', { title: '契約書チェック', assignee_id: ids.sato, due_date: '2026-04-20' });
+    assert.equal(t.status, 200);
+    const satoTodos = (await ids.satoClient.req('GET', '/api/todos')).data;
+    assert.equal(satoTodos[0].requester_name, '山田 太郎');
+    const requested = (await ids.yamadaClient.req('GET', '/api/todos?box=requested')).data;
+    assert.equal(requested.length, 1);
+    assert.equal(requested[0].assignee_name, '佐藤 花子');
+    assert.equal((await ids.satoClient.req('PUT', `/api/todos/${t.data.id}`, { done: true })).status, 200);
+    assert.equal((await ids.yamadaClient.req('GET', '/api/todos?box=requested')).data[0].done, true);
+    assert.equal((await admin.req('PUT', `/api/todos/${t.data.id}`, { done: false })).status, 404, '無関係の人は操作できない');
+  });
+});
+
+describe('ブログ', () => {
+  test('投稿・検索・いいね・コメント', async () => {
+    const b = await ids.yamadaClient.req('POST', '/api/blogs', { title: '渋谷エリアの最新動向', body: '駅前再開発で100%_成約が増加' });
+    assert.equal(b.status, 200);
+    assert.equal((await ids.satoClient.req('GET', '/api/blogs?q=再開発')).data.length, 1);
+    assert.equal((await ids.satoClient.req('GET', '/api/blogs?q=100%_')).data.length, 1, 'LIKE の特殊文字をそのまま検索');
+    assert.equal((await ids.satoClient.req('GET', '/api/blogs?q=50%')).data.length, 0);
+    assert.equal((await ids.satoClient.req('GET', `/api/blogs?author=${ids.sato}`)).data.length, 0);
+    assert.equal((await ids.satoClient.req('POST', `/api/blogs/${b.data.id}/like`)).data.liked, true);
+    const cm = await ids.satoClient.req('POST', `/api/blogs/${b.data.id}/comments`, { body: '参考になります' });
+    const d = (await ids.satoClient.req('GET', `/api/blogs/${b.data.id}`)).data;
+    assert.deepEqual(d.likers, ['佐藤 花子']);
+    assert.equal(d.comments.length, 1);
+    assert.equal(d.can_edit, false);
+    assert.equal((await ids.satoClient.req('PUT', `/api/blogs/${b.data.id}`, { title: 'x', body: 'y' })).status, 403);
+    assert.equal((await ids.yamadaClient.req('DELETE', `/api/blog-comments/${cm.data.id}`)).status, 403, '他人のコメントは消せない');
+    assert.equal((await ids.satoClient.req('POST', `/api/blogs/${b.data.id}/like`)).data.liked, false, 'もう一度押すと取り消し');
+  });
+});
+
+describe('チャット', () => {
+  test('1対1トークは同じ相手なら同じルームになり、未読が数えられる', async () => {
+    const r1 = await ids.yamadaClient.req('POST', '/api/chat/direct', { user_id: ids.sato });
+    const r2 = await ids.satoClient.req('POST', '/api/chat/direct', { user_id: ids.yamada });
+    assert.equal(r1.data.id, r2.data.id);
+    await ids.yamadaClient.req('POST', `/api/chat/rooms/${r1.data.id}/messages`, { body: 'お疲れさまです' });
+    await ids.yamadaClient.req('POST', `/api/chat/rooms/${r1.data.id}/messages`, { body: '明日の件です' });
+    const rooms = (await ids.satoClient.req('GET', '/api/chat/rooms')).data;
+    assert.equal(rooms[0].name, '山田 太郎');
+    assert.equal(rooms[0].unread, 2);
+    assert.equal((await ids.satoClient.req('GET', '/api/dashboard')).data.chat_unread, 2);
+    const msgs = (await ids.satoClient.req('GET', `/api/chat/rooms/${r1.data.id}/messages`)).data.messages;
+    assert.equal(msgs.length, 2);
+    assert.equal((await ids.satoClient.req('GET', '/api/chat/rooms')).data[0].unread, 0, '読んだら既読');
+    const after = (await ids.satoClient.req('GET', `/api/chat/rooms/${r1.data.id}/messages?after=${msgs[0].id}`)).data.messages;
+    assert.equal(after.length, 1);
+    assert.equal((await ids.yamadaClient.req('GET', '/api/chat/rooms')).data[0].unread, 0, '自分の発言は未読にならない');
+  });
+
+  test('メンバー以外はグループを読めない・退出すると見えない', async () => {
+    const g = await ids.yamadaClient.req('POST', '/api/chat/rooms', { name: '営業部', member_ids: [ids.sato] });
+    assert.equal((await admin.req('GET', `/api/chat/rooms/${g.data.id}/messages`)).status, 404);
+    assert.equal((await admin.req('POST', `/api/chat/rooms/${g.data.id}/messages`, { body: 'x' })).status, 404);
+    await ids.satoClient.req('POST', `/api/chat/rooms/${g.data.id}/leave`);
+    assert.equal((await ids.satoClient.req('GET', `/api/chat/rooms/${g.data.id}`)).status, 404);
+    const room = (await ids.yamadaClient.req('GET', `/api/chat/rooms/${g.data.id}`)).data;
+    assert.equal(room.members.length, 1);
+  });
+});
+
+describe('日程調整', () => {
+  test('回答 → 決定でスケジュールに登録される', async () => {
+    const meId = (await admin.req('GET', '/api/me')).data.id;
+    const p = await ids.yamadaClient.req('POST', '/api/polls', {
+      title: '物件オーナー打合せ',
+      member_ids: [ids.sato, meId],
+      slots: [
+        { start_at: '2026-04-01 10:30', end_at: '2026-04-01 11:30' },
+        { start_at: '2026-04-21 14:00', end_at: '2026-04-21 15:00' },
+      ],
+    });
+    assert.equal(p.status, 200);
+    assert.equal((await ids.satoClient.req('GET', '/api/dashboard')).data.polls_unanswered, 1);
+    const d = (await ids.satoClient.req('GET', `/api/polls/${p.data.id}`)).data;
+    const [s1, s2] = d.slots;
+    assert.equal(d.busy[`${s1.id}:${ids.sato}`], true, '既存予定（商談）と重なる候補は予定ありと表示');
+    assert.equal(d.busy[`${s2.id}:${ids.sato}`], undefined);
+    const bad = await ids.satoClient.req('PUT', `/api/polls/${p.data.id}/answer`, { answers: { [s1.id]: 'ok' } });
+    assert.equal(bad.status, 400);
+    await ids.satoClient.req('PUT', `/api/polls/${p.data.id}/answer`, { answers: { [s1.id]: 'no', [s2.id]: 'yes' }, comment: '午後なら可' });
+    assert.equal((await ids.satoClient.req('GET', '/api/dashboard')).data.polls_unanswered, 0);
+    assert.equal((await ids.satoClient.req('POST', `/api/polls/${p.data.id}/decide`, { slot_id: s2.id })).status, 403, '主催者以外は決定できない');
+    const dec = await ids.yamadaClient.req('POST', `/api/polls/${p.data.id}/decide`, { slot_id: s2.id, facility_ids: [ids.roomA] });
+    assert.equal(dec.status, 200);
+    const ev = (await admin.req('GET', `/api/events/${dec.data.event_id}`)).data;
+    assert.equal(ev.start_at, '2026-04-21 14:00');
+    assert.equal(ev.participant_ids.length, 3);
+    assert.deepEqual(ev.facility_ids, [ids.roomA]);
+    assert.equal((await ids.satoClient.req('PUT', `/api/polls/${p.data.id}/answer`, { answers: {} })).status, 409, '決定後は回答不可');
+  });
+
+  test('参加者以外は閲覧できない', async () => {
+    const p = await ids.yamadaClient.req('POST', '/api/polls', {
+      title: '面談', member_ids: [ids.sato], slots: [{ start_at: '2026-05-01 10:00', end_at: '2026-05-01 11:00' }],
+    });
+    const other = new Client();
+    await other.login('suzuki2', NEW_PW);
+    assert.equal((await other.req('GET', `/api/polls/${p.data.id}`)).status, 404);
+    assert.equal((await other.req('GET', '/api/polls')).data.length, 0);
+  });
+});
+
+describe('既存データベースの移行', () => {
+  test('古い todos テーブルに列を追加する', async () => {
+    const { DatabaseSync } = await import('node:sqlite');
+    const { mkdtempSync, rmSync } = await import('node:fs');
+    const { join } = await import('node:path');
+    const { tmpdir } = await import('node:os');
+    const dir = mkdtempSync(join(tmpdir(), 'gw-'));
+    const file = join(dir, 'old.db');
+    const old = new DatabaseSync(file);
+    old.exec(`CREATE TABLE users (id INTEGER PRIMARY KEY, login_id TEXT, name TEXT, password_hash TEXT);
+      CREATE TABLE todos (id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL, title TEXT NOT NULL, due_date TEXT, done INTEGER NOT NULL DEFAULT 0, created_at TEXT);
+      INSERT INTO users VALUES (1, 'a', 'A', 'x'); INSERT INTO todos (user_id, title) VALUES (1, '古いToDo');`);
+    old.close();
+    const db2 = openDb(file);
+    const row = db2.prepare('SELECT * FROM todos').get();
+    assert.equal(row.created_by, 1);
+    assert.equal(row.memo, '');
+    db2.close();
+    rmSync(dir, { recursive: true });
+  });
+});

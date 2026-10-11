@@ -1,6 +1,8 @@
 // 掲示板（お知らせ）・ToDo・ホーム画面の集計。
 import { fail } from '../http.mjs';
 import { addDays, bool, date, int, localToday, str } from '../validate.mjs';
+import { chatUnreadCount } from './chat.mjs';
+import { unansweredPollCount } from './polls.mjs';
 import { pendingApprovalCount } from './workflow.mjs';
 
 function loadPost(db, id) {
@@ -79,40 +81,55 @@ export function register(r) {
     return { ok: true };
   });
 
-  // ---- ToDo（本人のみ） ----
-  r.add('GET', '/api/todos', (c) =>
-    c.db
-      .prepare(
-        `SELECT * FROM todos WHERE user_id = ?
-          ORDER BY done, due_date IS NULL, due_date, id DESC LIMIT 500`,
-      )
-      .all(c.user.id)
-      .map((t) => ({ ...t, done: !!t.done })),
-  );
+  // ---- ToDo（自分用・他の社員への依頼） ----
+  const TODO_SQL = `SELECT t.*, a.name assignee_name, c.name requester_name
+                      FROM todos t JOIN users a ON a.id = t.user_id LEFT JOIN users c ON c.id = t.created_by`;
+  const todoOut = (t) => ({ ...t, done: !!t.done });
+
+  // 担当者・依頼者のどちらでもないものは見せない
+  function loadTodo(db, id, user) {
+    const t = db.prepare(`${TODO_SQL} WHERE t.id = ?`).get(id);
+    if (!t || (t.user_id !== user.id && t.created_by !== user.id)) fail(404, 'ToDo が見つかりません');
+    return t;
+  }
+
+  // box: mine=自分が担当 / requested=自分が他の人へ依頼
+  r.add('GET', '/api/todos', (c) => {
+    const box = c.query.get('box') || 'mine';
+    const order = ' ORDER BY t.done, t.due_date IS NULL, t.due_date, t.id DESC LIMIT 500';
+    if (box === 'requested') {
+      return c.db.prepare(`${TODO_SQL} WHERE t.created_by = ? AND t.user_id != ?${order}`).all(c.user.id, c.user.id).map(todoOut);
+    }
+    return c.db.prepare(`${TODO_SQL} WHERE t.user_id = ?${order}`).all(c.user.id).map(todoOut);
+  });
 
   r.add('POST', '/api/todos', (c) => {
     const title = str(c.body.title, '内容', { required: true, max: 200 });
     const due = date(c.body.due_date, '期限');
+    const memo = str(c.body.memo, 'メモ', { max: 2000 });
+    const assignee = int(c.body.assignee_id, '担当者', { min: 1 }) ?? c.user.id;
+    if (!c.db.prepare('SELECT 1 FROM users WHERE id = ? AND active = 1').get(assignee)) fail(400, '担当者が見つかりません');
     const { lastInsertRowid } = c.db
-      .prepare('INSERT INTO todos (user_id, title, due_date) VALUES (?, ?, ?)')
-      .run(c.user.id, title, due);
+      .prepare('INSERT INTO todos (user_id, created_by, title, due_date, memo) VALUES (?, ?, ?, ?, ?)')
+      .run(assignee, c.user.id, title, due, memo);
     return { id: Number(lastInsertRowid) };
   });
 
   r.add('PUT', '/api/todos/:id', (c) => {
     const id = int(c.params.id, 'ID', { required: true });
-    const t = c.db.prepare('SELECT * FROM todos WHERE id = ? AND user_id = ?').get(id, c.user.id);
-    if (!t) fail(404, 'ToDo が見つかりません');
+    const t = loadTodo(c.db, id, c.user);
     const title = c.body.title === undefined ? t.title : str(c.body.title, '内容', { required: true, max: 200 });
     const due = c.body.due_date === undefined ? t.due_date : date(c.body.due_date, '期限');
+    const memo = c.body.memo === undefined ? t.memo : str(c.body.memo, 'メモ', { max: 2000 });
     const done = c.body.done === undefined ? t.done : bool(c.body.done) ? 1 : 0;
-    c.db.prepare('UPDATE todos SET title = ?, due_date = ?, done = ? WHERE id = ?').run(title, due, done, id);
+    c.db.prepare('UPDATE todos SET title = ?, due_date = ?, memo = ?, done = ? WHERE id = ?').run(title, due, memo, done, id);
     return { ok: true };
   });
 
   r.add('DELETE', '/api/todos/:id', (c) => {
     const id = int(c.params.id, 'ID', { required: true });
-    c.db.prepare('DELETE FROM todos WHERE id = ? AND user_id = ?').run(id, c.user.id);
+    loadTodo(c.db, id, c.user);
+    c.db.prepare('DELETE FROM todos WHERE id = ?').run(id);
     return { ok: true };
   });
 
@@ -137,12 +154,21 @@ export function register(r) {
       .all(c.user.id);
     const todos = c.db
       .prepare(
-        `SELECT * FROM todos WHERE user_id = ? AND done = 0 ORDER BY due_date IS NULL, due_date, id DESC LIMIT 10`,
+        `${TODO_SQL} WHERE t.user_id = ? AND t.done = 0 ORDER BY t.due_date IS NULL, t.due_date, t.id DESC LIMIT 10`,
       )
       .all(c.user.id);
     const myPending = c.db
       .prepare(`SELECT COUNT(*) n FROM requests WHERE applicant_id = ? AND status IN ('pending','returned')`)
       .get(c.user.id).n;
-    return { today, events, unread, todos, approvals: pendingApprovalCount(c.db, c.user.id), my_pending: myPending };
+    return {
+      today,
+      events,
+      unread,
+      todos,
+      approvals: pendingApprovalCount(c.db, c.user.id),
+      my_pending: myPending,
+      chat_unread: chatUnreadCount(c.db, c.user.id),
+      polls_unanswered: unansweredPollCount(c.db, c.user.id),
+    };
   });
 }

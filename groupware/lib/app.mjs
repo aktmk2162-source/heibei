@@ -2,8 +2,11 @@
 import { fileURLToPath } from 'node:url';
 import { LoginLimiter, SESSION_COOKIE, hashPassword, loadSession, randomPassword } from './auth.mjs';
 import { HttpError, Router, parseCookies, readBody, sendJson, sendText, serveStatic } from './http.mjs';
+import * as blogApi from './api/blog.mjs';
 import * as boardApi from './api/board.mjs';
+import * as chatApi from './api/chat.mjs';
 import * as eventsApi from './api/events.mjs';
+import * as pollsApi from './api/polls.mjs';
 import * as usersApi from './api/users.mjs';
 import * as workflowApi from './api/workflow.mjs';
 
@@ -27,6 +30,9 @@ export function createApp(db, { secureCookie = false, trustProxy = false, log = 
   eventsApi.register(router);
   workflowApi.register(router);
   boardApi.register(router);
+  blogApi.register(router);
+  chatApi.register(router);
+  pollsApi.register(router);
 
   const auditStmt = db.prepare('INSERT INTO audit_log (user_id, action, target) VALUES (?, ?, ?)');
 
