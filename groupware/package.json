@@ -1,0 +1,15 @@
+{
+  "name": "heibei-groupware",
+  "private": true,
+  "version": "1.0.0",
+  "description": "社内グループウェア（スケジュール・施設予約・ワークフロー・掲示板・ToDo）",
+  "type": "module",
+  "engines": {
+    "node": ">=22.13"
+  },
+  "scripts": {
+    "start": "node --disable-warning=ExperimentalWarning server.mjs",
+    "test": "node --disable-warning=ExperimentalWarning --test test/api.test.mjs",
+    "backup": "node --disable-warning=ExperimentalWarning scripts/backup.mjs"
+  }
+}

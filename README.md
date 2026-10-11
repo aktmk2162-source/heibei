@@ -6,6 +6,10 @@
 - 全員が同じ8問を解きます（日替わり）
 - スコアは平均誤差率のみ。運の要素はありません
 
+## 社内グループウェア
+
+`groupware/` に、クロジカ スケジュール管理を置き換える社内グループウェアがあります。詳しくは [groupware/README.md](groupware/README.md) を参照してください（このゲームとは独立しています）。
+
 ## 遊ぶ
 
 https://aktmk2162-source.github.io/heibei/
