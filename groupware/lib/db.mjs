@@ -180,6 +180,30 @@ CREATE TABLE IF NOT EXISTS poll_answers (
   answer TEXT NOT NULL CHECK (answer IN ('yes','maybe','no')),
   PRIMARY KEY (slot_id, user_id)
 );
+CREATE TABLE IF NOT EXISTS templates (
+  id INTEGER PRIMARY KEY,
+  title TEXT NOT NULL,
+  category TEXT NOT NULL,
+  description TEXT NOT NULL DEFAULT '',
+  usage TEXT NOT NULL DEFAULT '',
+  owner_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  downloads INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
+);
+CREATE TABLE IF NOT EXISTS template_files (
+  id INTEGER PRIMARY KEY,
+  template_id INTEGER NOT NULL REFERENCES templates(id) ON DELETE CASCADE,
+  version INTEGER NOT NULL,
+  original_name TEXT NOT NULL,
+  stored_name TEXT NOT NULL UNIQUE,
+  size INTEGER NOT NULL,
+  sha256 TEXT NOT NULL,
+  note TEXT NOT NULL DEFAULT '',
+  uploaded_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  uploaded_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+  UNIQUE (template_id, version)
+);
 CREATE TABLE IF NOT EXISTS audit_log (
   id INTEGER PRIMARY KEY,
   user_id INTEGER,

@@ -1,10 +1,11 @@
-// 稼働中でも安全に DB をバックアップする（SQLite の VACUUM INTO を使用）。
+// 稼働中でも安全に DB とテンプレートのファイルをバックアップする。
 // 使い方: npm run backup  （保存先は BACKUP_DIR、既定は ./backups）
-import { mkdirSync, readdirSync, rmSync } from 'node:fs';
-import { join } from 'node:path';
+import { copyFileSync, existsSync, mkdirSync, readdirSync, rmSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 
 const dbFile = process.env.DB_FILE || new URL('../data/groupware.db', import.meta.url).pathname;
+const filesDir = process.env.FILES_DIR || join(dirname(dbFile), 'files');
 const dir = process.env.BACKUP_DIR || new URL('../backups', import.meta.url).pathname;
 const keep = Number(process.env.BACKUP_KEEP || 30);
 
@@ -14,8 +15,21 @@ const out = join(dir, `groupware-${stamp}.db`);
 const db = new DatabaseSync(dbFile, { readOnly: true });
 db.prepare('VACUUM INTO ?').run(out);
 db.close();
-console.log(`バックアップを作成しました: ${out}`);
+console.log(`データベースをバックアップしました: ${out}`);
 
-// 古いバックアップを削除（新しい順に keep 件を残す）
+// アップロードされたファイルは内容が変わらない（更新は別名で追加）ため、未コピーの分だけ追加する
+if (existsSync(filesDir)) {
+  const dest = join(dir, 'files');
+  mkdirSync(dest, { recursive: true });
+  let copied = 0;
+  for (const f of readdirSync(filesDir)) {
+    if (f.endsWith('.part') || existsSync(join(dest, f))) continue;
+    copyFileSync(join(filesDir, f), join(dest, f));
+    copied++;
+  }
+  console.log(`ファイルを ${copied} 件追加でバックアップしました: ${dest}`);
+}
+
+// 古い DB バックアップを削除（新しい順に keep 件を残す）
 const files = readdirSync(dir).filter((f) => /^groupware-.*\.db$/.test(f)).sort().reverse();
 for (const f of files.slice(keep)) rmSync(join(dir, f));

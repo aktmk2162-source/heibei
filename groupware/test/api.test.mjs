@@ -1,5 +1,8 @@
 import assert from 'node:assert/strict';
+import { mkdtempSync, readdirSync, rmSync } from 'node:fs';
 import { createServer } from 'node:http';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { after, before, describe, test } from 'node:test';
 import { bootstrapAdmin, createApp } from '../lib/app.mjs';
 import { openDb } from '../lib/db.mjs';
@@ -7,6 +10,7 @@ import { openDb } from '../lib/db.mjs';
 let server;
 let base;
 let db;
+let filesDir;
 
 // Cookie と CSRF トークンを保持する簡易クライアント
 class Client {
@@ -52,7 +56,8 @@ before(async () => {
   const boot = bootstrapAdmin(db, { loginId: 'admin', password: 'Initial-Pass1' });
   assert.ok(boot);
   assert.equal(bootstrapAdmin(db), null, '2回目は作成しない');
-  server = createServer(createApp(db, { log: { error: () => {} } }));
+  filesDir = mkdtempSync(join(tmpdir(), 'gw-files-'));
+  server = createServer(createApp(db, { filesDir, maxUploadMb: 1, log: { error: () => {} } }));
   await new Promise((r) => server.listen(0, '127.0.0.1', r));
   base = `http://127.0.0.1:${server.address().port}`;
   admin = await activate(new Client(), 'admin', 'Initial-Pass1');
@@ -61,6 +66,7 @@ before(async () => {
 after(() => {
   server.close();
   db.close();
+  rmSync(filesDir, { recursive: true, force: true });
 });
 
 describe('認証', () => {
@@ -439,5 +445,68 @@ describe('既存データベースの移行', () => {
     assert.equal(row.memo, '');
     db2.close();
     rmSync(dir, { recursive: true });
+  });
+});
+
+describe('テンプレート集', () => {
+  const upload = (client, id, name, body, note = '') =>
+    fetch(`${base}/api/templates/${id}/files?${new URLSearchParams({ name, note })}`, {
+      method: 'POST',
+      headers: { cookie: client.cookie, 'x-csrf-token': client.csrf, 'content-type': 'application/octet-stream' },
+      body,
+    });
+
+  test('登録・版の追加・ダウンロード', async () => {
+    const t = await ids.yamadaClient.req('POST', '/api/templates', {
+      title: '一棟収益 収支シミュレーション', category: '収支・投資シミュレーション', description: '表面・実質利回りとCFを計算', usage: '黄色のセルに入力',
+    });
+    assert.equal(t.status, 200);
+    ids.tpl = t.data.id;
+    const v1 = await upload(ids.yamadaClient, ids.tpl, '収支シミュレーション.xlsx', 'version-1');
+    assert.equal(v1.status, 200);
+    const v2 = await upload(ids.yamadaClient, ids.tpl, '収支シミュレーション.xlsm', 'version-2-macro', '金利入力を追加');
+    assert.equal((await v2.json()).version, 2);
+    const d = (await ids.satoClient.req('GET', `/api/templates/${ids.tpl}`)).data;
+    assert.equal(d.files.length, 2);
+    assert.equal(d.files[0].version, 2);
+    assert.equal(d.files[0].has_macro, true);
+    assert.equal(d.files[0].stored_name, undefined, '保存名は返さない');
+    assert.equal(d.can_edit, false);
+    const dl = await fetch(`${base}/api/template-files/${d.files[0].id}/download`, { headers: { cookie: ids.satoClient.cookie } });
+    assert.equal(dl.status, 200);
+    assert.equal(dl.headers.get('content-type'), 'application/octet-stream');
+    assert.match(dl.headers.get('content-disposition'), /^attachment; .*filename\*=UTF-8''%E5%8F%8E/);
+    assert.equal(await dl.text(), 'version-2-macro');
+    const list = (await ids.satoClient.req('GET', '/api/templates?category=' + encodeURIComponent('収支・投資シミュレーション'))).data;
+    assert.equal(list[0].downloads, 1);
+    assert.equal(list[0].version, 2);
+    assert.equal((await ids.satoClient.req('GET', '/api/templates?q=利回り')).data.length, 1);
+    assert.equal((await ids.satoClient.req('GET', '/api/templates?category=' + encodeURIComponent('その他'))).data.length, 0);
+  });
+
+  test('未ログイン・権限なし・危険な形式・サイズ超過は拒否', async () => {
+    const d = (await ids.satoClient.req('GET', `/api/templates/${ids.tpl}`)).data;
+    assert.equal((await fetch(`${base}/api/template-files/${d.files[0].id}/download`)).status, 401);
+    assert.equal((await upload(ids.satoClient, ids.tpl, 'x.xlsx', 'x')).status, 403, '登録者以外は更新できない');
+    assert.equal((await upload(ids.yamadaClient, ids.tpl, 'evil.exe', 'x')).status, 400);
+    assert.equal((await upload(ids.yamadaClient, ids.tpl, 'evil.html', 'x')).status, 400);
+    assert.equal((await upload(ids.yamadaClient, ids.tpl, '../../etc/x.xlsx', 'x')).status, 200, 'パス区切りは無害化される');
+    const big = await upload(ids.yamadaClient, ids.tpl, 'big.xlsx', Buffer.alloc(1024 * 1024 + 10));
+    assert.equal(big.status, 413);
+    const noCsrf = await fetch(`${base}/api/templates/${ids.tpl}/files?name=a.xlsx`, { method: 'POST', headers: { cookie: ids.yamadaClient.cookie }, body: 'x' });
+    assert.equal(noCsrf.status, 403);
+    assert.equal(readdirSync(filesDir).filter((f) => f.endsWith('.part')).length, 0, '一時ファイルが残らない');
+    const files = (await ids.yamadaClient.req('GET', `/api/templates/${ids.tpl}`)).data.files;
+    assert.equal(files[0].original_name, '.._.._etc_x.xlsx');
+  });
+
+  test('古い版の削除とテンプレート削除でファイルも消える', async () => {
+    const files = (await ids.yamadaClient.req('GET', `/api/templates/${ids.tpl}`)).data.files;
+    assert.equal((await ids.yamadaClient.req('DELETE', `/api/template-files/${files[0].id}`)).status, 400, '最新版は消せない');
+    assert.equal((await ids.yamadaClient.req('DELETE', `/api/template-files/${files[2].id}`)).status, 200);
+    assert.equal(readdirSync(filesDir).length, 2);
+    assert.equal((await ids.satoClient.req('DELETE', `/api/templates/${ids.tpl}`)).status, 403);
+    assert.equal((await admin.req('DELETE', `/api/templates/${ids.tpl}`)).status, 200, '管理者は削除できる');
+    assert.equal(readdirSync(filesDir).length, 0);
   });
 });

@@ -1,12 +1,14 @@
 // リクエスト処理の本体（認証・CSRF・ルーティング・エラー応答）。
+import { createReadStream } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { LoginLimiter, SESSION_COOKIE, hashPassword, loadSession, randomPassword } from './auth.mjs';
-import { HttpError, Router, parseCookies, readBody, sendJson, sendText, serveStatic } from './http.mjs';
+import { HttpError, Router, SECURITY_HEADERS, contentDisposition, parseCookies, readBody, sendJson, sendText, serveStatic } from './http.mjs';
 import * as blogApi from './api/blog.mjs';
 import * as boardApi from './api/board.mjs';
 import * as chatApi from './api/chat.mjs';
 import * as eventsApi from './api/events.mjs';
 import * as pollsApi from './api/polls.mjs';
+import * as templatesApi from './api/templates.mjs';
 import * as usersApi from './api/users.mjs';
 import * as workflowApi from './api/workflow.mjs';
 
@@ -23,7 +25,7 @@ export function bootstrapAdmin(db, { loginId = 'admin', password } = {}) {
   return { loginId, password: pw };
 }
 
-export function createApp(db, { secureCookie = false, trustProxy = false, log = console } = {}) {
+export function createApp(db, { secureCookie = false, trustProxy = false, filesDir, maxUploadMb = 50, log = console } = {}) {
   const router = new Router();
   const limiter = new LoginLimiter();
   usersApi.register(router, { limiter, secureCookie });
@@ -33,6 +35,7 @@ export function createApp(db, { secureCookie = false, trustProxy = false, log = 
   blogApi.register(router);
   chatApi.register(router);
   pollsApi.register(router);
+  templatesApi.register(router, { filesDir, maxUploadBytes: maxUploadMb * 1024 * 1024 });
 
   const auditStmt = db.prepare('INSERT INTO audit_log (user_id, action, target) VALUES (?, ?, ?)');
 
@@ -69,7 +72,8 @@ export function createApp(db, { secureCookie = false, trustProxy = false, log = 
       }
 
       const ip = (trustProxy && String(req.headers['x-forwarded-for'] || '').split(',')[0].trim()) || req.socket.remoteAddress;
-      const body = req.method === 'GET' ? {} : await readBody(req);
+      // raw 指定のルート（ファイルのアップロード）は本文をハンドラーが直接読む
+      const body = req.method === 'GET' || route.opts.raw ? {} : await readBody(req);
       const ctx = {
         db,
         req,
@@ -84,12 +88,29 @@ export function createApp(db, { secureCookie = false, trustProxy = false, log = 
       };
       const result = await route.handler(ctx);
       if (result && typeof result.raw === 'string') {
-        return sendText(res, 200, result.raw, result.type, {
-          'Content-Disposition': `attachment; filename="${result.filename}"`,
+        return sendText(res, 200, result.raw, result.type, { 'Content-Disposition': contentDisposition(result.filename) });
+      }
+      if (result && result.file) {
+        // ダウンロードは常に添付扱い・汎用の型で返し、ブラウザ内で開かせない（XSS 対策）
+        res.writeHead(200, {
+          ...SECURITY_HEADERS,
+          'Content-Type': 'application/octet-stream',
+          'Content-Length': result.size,
+          'Content-Disposition': contentDisposition(result.filename),
+          'Cache-Control': 'private, no-store',
         });
+        createReadStream(result.file)
+          .on('error', (e) => {
+            log.error(e);
+            res.destroy();
+          })
+          .pipe(res);
+        return;
       }
       sendJson(res, 200, result ?? { ok: true });
     } catch (err) {
+      // 途中で打ち切ったアップロードの残りは読み捨てる
+      if (req.readable) req.resume();
       if (err instanceof HttpError) return sendJson(res, err.status, { error: err.message });
       log.error(err);
       if (!res.headersSent) sendJson(res, 500, { error: 'サーバーでエラーが発生しました' });

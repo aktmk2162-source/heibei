@@ -1,5 +1,6 @@
 // 起動スクリプト。設定は環境変数で行う（README 参照）。
 import { createServer } from 'node:http';
+import { dirname, join } from 'node:path';
 import { purgeExpiredSessions } from './lib/auth.mjs';
 import { bootstrapAdmin, createApp } from './lib/app.mjs';
 import { openDb } from './lib/db.mjs';
@@ -23,6 +24,8 @@ if (admin) {
 const handle = createApp(db, {
   secureCookie: env.COOKIE_SECURE === '1',
   trustProxy: env.TRUST_PROXY === '1',
+  filesDir: env.FILES_DIR || join(dirname(dbFile), 'files'),
+  maxUploadMb: Number(env.MAX_UPLOAD_MB || 50),
 });
 
 purgeExpiredSessions(db);

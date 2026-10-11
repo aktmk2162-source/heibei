@@ -58,7 +58,7 @@ function toast(msg, type = '') {
 }
 
 // ================= API =================
-const state = { me: null, users: [], departments: [], facilities: [], types: [], counts: { approvals: 0, unread: 0, chat: 0, polls: 0 }, chatTimer: null };
+const state = { me: null, users: [], departments: [], facilities: [], types: [], templateCategories: [], counts: { approvals: 0, unread: 0, chat: 0, polls: 0 }, chatTimer: null };
 
 class ApiError extends Error {
   constructor(status, data) {
@@ -98,11 +98,12 @@ const guard = (fn) => async (...args) => {
 };
 
 async function loadMasters() {
-  [state.users, state.departments, state.facilities, state.types] = await Promise.all([
+  [state.users, state.departments, state.facilities, state.types, state.templateCategories] = await Promise.all([
     api('GET', '/api/users'),
     api('GET', '/api/departments'),
     api('GET', '/api/facilities'),
     api('GET', '/api/request-types'),
+    api('GET', '/api/template-categories'),
   ]);
 }
 const userName = (id) => state.users.find((u) => u.id === id)?.name ?? '（退職者等）';
@@ -315,6 +316,7 @@ const NAV = [
   ['#/poll', '日程調整', 'polls'],
   ['#/workflow', 'ワークフロー', 'approvals'],
   ['#/board', '掲示板', 'unread'],
+  ['#/templates', 'テンプレート集'],
   ['#/blog', 'ブログ'],
   ['#/chat', 'チャット', 'chat'],
   ['#/todo', 'ToDo'],
@@ -1492,6 +1494,188 @@ async function pagePollDetail(id) {
   ]);
 }
 
+// ================= テンプレート集 =================
+const FILE_KIND = {
+  xlsx: 'Excel', xlsm: 'Excel', xlsb: 'Excel', xls: 'Excel', xltx: 'Excel', xltm: 'Excel', csv: 'CSV',
+  docx: 'Word', docm: 'Word', doc: 'Word', dotx: 'Word', pptx: 'PowerPoint', pptm: 'PowerPoint', ppt: 'PowerPoint',
+  pdf: 'PDF', zip: 'ZIP', txt: 'テキスト', md: 'テキスト', json: 'JSON', py: 'Python', gs: 'GAS', bas: 'VBA', cls: 'VBA', frm: 'VBA', sql: 'SQL',
+};
+const fileBadge = (e) => (e ? h('span', { class: `fbadge f-${(FILE_KIND[e] || 'other').toLowerCase()}` }, FILE_KIND[e] || e.toUpperCase()) : null);
+const fmtSize = (n) => (n >= 1048576 ? `${(n / 1048576).toFixed(1)}MB` : `${Math.max(1, Math.round(n / 1024))}KB`);
+const MACRO_NOTE = 'マクロ・プログラムを含む形式です。社内で作成されたものであることを確認してから有効化してください。';
+
+async function uploadTemplateFile(id, file, note) {
+  const qs = new URLSearchParams({ name: file.name, note: note || '' });
+  const res = await fetch(`/api/templates/${id}/files?${qs}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/octet-stream', 'X-CSRF-Token': state.me.csrf },
+    body: file,
+    credentials: 'same-origin',
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new ApiError(res.status, data);
+  return data;
+}
+
+async function pageTemplates() {
+  const q = query();
+  const word = q.get('q') || '';
+  const cat = q.get('category') || '';
+  const params = new URLSearchParams();
+  if (word) params.set('q', word);
+  if (cat) params.set('category', cat);
+  const list = await api('GET', `/api/templates?${params}`);
+  const search = h('input', { type: 'search', value: word, placeholder: '名称・説明で検索', style: 'min-width:220px' });
+  const apply = (e) => {
+    e?.preventDefault();
+    const p = {};
+    if (search.value.trim()) p.q = search.value.trim();
+    if (cat) p.category = cat;
+    go('#/templates', p);
+  };
+  const catLink = (c, label) => h('a', { href: `#/templates${c ? `?category=${encodeURIComponent(c)}` : ''}`, class: cat === c ? 'active' : '' }, label);
+  shell([
+    h('div', { class: 'row between' }, h('h1', {}, 'テンプレート集'), h('button', { class: 'primary', onclick: () => go('#/templates/new') }, '＋ テンプレートを登録')),
+    h('p', { class: 'muted small' }, '社内で作成した収支シミュレーション、ローン計算、業務自動化のマクロ・スクリプトなどを共有する場所です。更新すると版が上がり、過去の版も残ります。'),
+    h('div', { class: 'tabs' }, catLink('', 'すべて'), state.templateCategories.map((c) => catLink(c, c))),
+    h('form', { class: 'row', style: 'margin-bottom:16px', onsubmit: apply }, search, h('button', { type: 'submit' }, '検索')),
+    list.length
+      ? h('div', { class: 'tpl-grid' }, list.map((t) =>
+          h('a', { class: 'card tpl-card', href: `#/templates/${t.id}` },
+            h('div', { class: 'row' }, fileBadge(t.ext), h('span', { class: 'muted small' }, t.category)),
+            h('h2', {}, t.title),
+            h('p', { class: 'small excerpt' }, t.excerpt || h('span', { class: 'muted' }, '説明なし')),
+            h('div', { class: 'small muted' }, `${t.owner_name || '—'}・v${t.version ?? '-'}・更新 ${t.updated_at.slice(0, 10)}・DL ${t.downloads}回`),
+          ),
+        ))
+      : h('div', { class: 'card empty' }, word || cat ? '該当するテンプレートはありません' : 'まだ登録がありません。最初のテンプレートを登録してください'),
+  ]);
+}
+
+async function pageTemplateDetail(id) {
+  const t = await api('GET', `/api/templates/${id}`);
+  const latest = t.files[0];
+  const newFile = h('input', { type: 'file' });
+  const note = h('input', { type: 'text', placeholder: '変更内容（例: 金利入力欄を追加）', maxlength: 500, style: 'flex:1;min-width:220px' });
+  shell([
+    h('div', { class: 'row', style: 'margin-bottom:12px' }, h('a', { href: '#/templates' }, '← 一覧へ戻る')),
+    h('div', { class: 'card' },
+      h('div', { class: 'row' }, fileBadge(latest?.ext), h('a', { class: 'small', href: `#/templates?category=${encodeURIComponent(t.category)}` }, t.category)),
+      h('h1', { style: 'margin-top:8px' }, t.title),
+      h('p', { class: 'muted small' }, `登録: ${t.owner_name || '—'}　更新: ${t.updated_at.slice(0, 16)}　ダウンロード ${t.downloads}回`),
+      latest
+        ? h('div', { class: 'row', style: 'margin:12px 0' },
+            h('a', { class: 'btn primary-btn', href: `/api/template-files/${latest.id}/download`, download: latest.original_name }, `⬇ ダウンロード（v${latest.version}・${fmtSize(latest.size)}）`),
+            h('span', { class: 'small muted' }, latest.original_name),
+          )
+        : h('div', { class: 'alert error' }, 'ファイルがまだ登録されていません'),
+      latest?.has_macro ? h('div', { class: 'alert info small' }, MACRO_NOTE) : null,
+      t.description ? [h('h3', { style: 'margin-top:16px' }, '説明'), h('div', { class: 'pre' }, t.description)] : null,
+      t.usage ? [h('h3', { style: 'margin-top:16px' }, '使い方・注意事項'), h('div', { class: 'pre' }, t.usage)] : null,
+      t.can_edit
+        ? h('div', { class: 'row', style: 'margin-top:16px' },
+            h('button', { onclick: () => go(`#/templates/${id}/edit`) }, '説明を編集'),
+            h('button', { class: 'danger', onclick: guard(async () => {
+              if (!(await confirmDialog(`「${t.title}」を削除しますか？\n過去の版を含むすべてのファイルが削除されます。`, '削除', true))) return;
+              await api('DELETE', `/api/templates/${id}`);
+              toast('削除しました');
+              go('#/templates');
+            }) }, '削除'),
+          )
+        : null,
+    ),
+    t.can_edit
+      ? h('div', { class: 'card' },
+          h('h2', {}, '新しい版をアップロード'),
+          h('div', { class: 'row' }, newFile, note, h('button', { class: 'primary', onclick: guard(async (e) => {
+            const f = newFile.files[0];
+            if (!f) return toast('ファイルを選択してください', 'error');
+            e.target.disabled = true;
+            try {
+              const r = await uploadTemplateFile(id, f, note.value);
+              toast(`v${r.version} をアップロードしました`);
+              route();
+            } finally {
+              e.target.disabled = false;
+            }
+          }) }, 'アップロード')),
+        )
+      : null,
+    h('div', { class: 'card' },
+      h('h2', {}, '版の履歴'),
+      t.files.length
+        ? h('div', { class: 'table-wrap' }, h('table', { class: 'list' },
+            h('thead', {}, h('tr', {}, ['版', 'ファイル', 'サイズ', '変更内容', '登録', ''].map((x) => h('th', {}, x)))),
+            h('tbody', {}, t.files.map((f, i) =>
+              h('tr', {},
+                h('td', {}, `v${f.version}`, i === 0 ? h('span', { class: 'status approved', style: 'margin-left:6px' }, '最新') : null),
+                h('td', {}, h('a', { href: `/api/template-files/${f.id}/download`, download: f.original_name }, f.original_name)),
+                h('td', { class: 'small' }, fmtSize(f.size)),
+                h('td', { class: 'small pre' }, f.note || '—'),
+                h('td', { class: 'small muted', style: 'white-space:nowrap' }, `${f.uploaded_by_name || '—'} ${f.uploaded_at.slice(0, 16)}`),
+                h('td', {}, t.can_edit && i > 0 ? h('button', { class: 'small danger', onclick: guard(async () => {
+                  if (!(await confirmDialog(`v${f.version} のファイルを削除しますか？`, '削除', true))) return;
+                  await api('DELETE', `/api/template-files/${f.id}`);
+                  route();
+                }) }, '削除') : null),
+              ),
+            )),
+          ))
+        : h('div', { class: 'empty' }, 'ファイルはまだありません'),
+    ),
+  ]);
+}
+
+async function pageTemplateForm(id) {
+  const t = id ? await api('GET', `/api/templates/${id}`) : null;
+  const err = h('div');
+  const title = h('input', { type: 'text', value: t?.title || '', maxlength: 100, placeholder: '例: 一棟収益物件 収支シミュレーション' });
+  const category = h('select', {}, h('option', { value: '' }, '選択してください'), state.templateCategories.map((c) => h('option', { value: c, selected: t?.category === c }, c)));
+  const description = h('textarea', { maxlength: 5000, style: 'min-height:100px', placeholder: '何ができるか、どんな場面で使うか' }, t?.description || '');
+  const usage = h('textarea', { maxlength: 10000, style: 'min-height:140px', placeholder: '入力する項目、前提条件、注意点など' }, t?.usage || '');
+  const file = h('input', { type: 'file' });
+  const submit = guard(async (e) => {
+    err.replaceChildren();
+    const data = { title: title.value, category: category.value, description: description.value, usage: usage.value };
+    if (!t && !file.files[0]) return err.replaceChildren(h('div', { class: 'alert error' }, 'ファイルを選択してください'));
+    e.target.disabled = true;
+    try {
+      if (t) {
+        await api('PUT', `/api/templates/${id}`, data);
+        toast('更新しました');
+        return go(`#/templates/${id}`);
+      }
+      const r = await api('POST', '/api/templates', data);
+      try {
+        await uploadTemplateFile(r.id, file.files[0], '初版');
+      } catch (upErr) {
+        // ファイルが受け付けられなければ、作りかけの登録は取り消す
+        await api('DELETE', `/api/templates/${r.id}`).catch(() => {});
+        throw upErr;
+      }
+      toast('登録しました');
+      go(`#/templates/${r.id}`);
+    } catch (ex) {
+      err.replaceChildren(h('div', { class: 'alert error' }, ex.message));
+    } finally {
+      e.target.disabled = false;
+    }
+  });
+  shell([
+    h('h1', {}, t ? 'テンプレートの編集' : 'テンプレートの登録'),
+    h('div', { class: 'card', style: 'max-width:820px' },
+      err,
+      field('名称', title, true),
+      field('分類', category, true),
+      t ? null : field('ファイル', file, true),
+      t ? null : h('p', { class: 'muted small' }, '対応形式: Excel・Word・PowerPoint・PDF・CSV・ZIP・テキスト・Python・GAS・VBA など（実行ファイルは不可）。上限 50MB。'),
+      field('説明', description),
+      field('使い方・注意事項', usage),
+      h('div', { class: 'row', style: 'margin-top:12px' }, h('button', { onclick: () => history.back() }, 'キャンセル'), h('button', { class: 'primary', onclick: submit }, t ? '更新する' : '登録する')),
+    ),
+  ]);
+}
+
 // ================= 個人設定 =================
 async function pageSettings() {
   const email = h('input', { type: 'email', value: state.me.email || '' });
@@ -1774,6 +1958,11 @@ async function route() {
         if (parts[1]) return await pageBlogDetail(parts[1]);
         return await pageBlog();
       case 'chat': return await pageChat(parts[1]);
+      case 'templates':
+        if (parts[1] === 'new') return await pageTemplateForm();
+        if (parts[1] && parts[2] === 'edit') return await pageTemplateForm(parts[1]);
+        if (parts[1]) return await pageTemplateDetail(parts[1]);
+        return await pageTemplates();
       case 'poll':
         if (parts[1] === 'new') return await pagePollForm();
         if (parts[1]) return await pagePollDetail(parts[1]);
