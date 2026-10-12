@@ -10,7 +10,10 @@ const dir = process.env.BACKUP_DIR || new URL('../backups', import.meta.url).pat
 const keep = Number(process.env.BACKUP_KEEP || 30);
 
 mkdirSync(dir, { recursive: true });
-const stamp = new Date().toISOString().replace(/[-:]/g, '').replace('T', '-').slice(0, 15);
+// ファイル名はサーバーの現地時刻（TZ）で付ける
+const now = new Date();
+const p2 = (n) => String(n).padStart(2, '0');
+const stamp = `${now.getFullYear()}${p2(now.getMonth() + 1)}${p2(now.getDate())}-${p2(now.getHours())}${p2(now.getMinutes())}${p2(now.getSeconds())}`;
 const out = join(dir, `groupware-${stamp}.db`);
 const db = new DatabaseSync(dbFile, { readOnly: true });
 db.prepare('VACUUM INTO ?').run(out);

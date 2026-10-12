@@ -53,6 +53,11 @@ export function createApp(
     const url = new URL(req.url, 'http://localhost');
     const { pathname } = url;
     try {
+      // 死活監視用（ログイン不要。DB に問い合わせられるかまで確認する）
+      if (pathname === '/healthz') {
+        db.prepare('SELECT 1').get();
+        return sendText(res, 200, 'ok', 'text/plain; charset=utf-8');
+      }
       if (!pathname.startsWith('/api/')) {
         if (req.method !== 'GET' && req.method !== 'HEAD') return sendJson(res, 405, { error: '許可されていない操作です' });
         if (await serveStatic(res, PUBLIC_DIR, pathname)) return;
