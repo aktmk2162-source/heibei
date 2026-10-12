@@ -1,0 +1,15 @@
+# 毎日のバックアップ（groupware-backup.timer から起動）
+[Unit]
+Description=社内グループウェア バックアップ
+
+[Service]
+Type=oneshot
+User=groupware
+Group=groupware
+WorkingDirectory=/opt/groupware
+EnvironmentFile=/etc/groupware/groupware.env
+ExecStart=/usr/bin/node --disable-warning=ExperimentalWarning /opt/groupware/scripts/backup.mjs
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/groupware /var/backups/groupware

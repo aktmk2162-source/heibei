@@ -1,0 +1,20 @@
+# 社内グループウェア用 Caddy 設定（/etc/caddy/Caddyfile）
+# 「gw.example.co.jp」を、社内で使うホスト名に置き換えてください。
+
+gw.example.co.jp {
+	# ---- 証明書：A・B のどちらか1つを有効にします（手順書「4. HTTPS」参照） ----
+
+	# A（推奨）会社で取得した証明書ファイルを使う
+	tls /etc/caddy/certs/fullchain.pem /etc/caddy/certs/privkey.pem
+
+	# B 社内専用の証明書を Caddy が発行する（各 PC・スマホに証明書の登録が必要）
+	# tls internal
+
+	# アップロード上限（アプリ側の上限 MAX_UPLOAD_MB より少し大きく）
+	request_body {
+		max_size 60MB
+	}
+
+	encode gzip
+	reverse_proxy 127.0.0.1:3000
+}

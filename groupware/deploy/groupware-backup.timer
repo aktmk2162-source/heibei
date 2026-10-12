@@ -1,0 +1,10 @@
+# 毎日 2:30 にバックアップ（サーバーが止まっていた場合は起動後に実行）
+[Unit]
+Description=社内グループウェア 毎日のバックアップ
+
+[Timer]
+OnCalendar=*-*-* 02:30:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target
