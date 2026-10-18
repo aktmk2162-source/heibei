@@ -8,6 +8,8 @@ set -euo pipefail
 APP_DIR=/opt/groupware
 SRC_DIR=$(cd "$(dirname "$0")/.." && pwd)
 PREV=/opt/groupware.prev
+PREV_UNITS=$PREV.units
+UNITS=(groupware.service groupware-backup.service groupware-backup.timer)
 
 [[ $EUID -eq 0 ]] || { echo "root で実行してください" >&2; exit 1; }
 
@@ -16,14 +18,18 @@ systemctl start groupware-backup.service
 
 echo "==> 2/4 現在の版を退避して、新しい版を配置"
 rsync -a --delete "$APP_DIR/" "$PREV/"
+# サービス定義も退避する（戻すときに一緒に戻す）
+install -d -m 755 "$PREV_UNITS"
+for u in "${UNITS[@]}"; do cp -p "/etc/systemd/system/$u" "$PREV_UNITS/$u"; done
 rsync -a --delete --chown=root:root \
   --exclude data --exclude backups --exclude test --exclude deploy --exclude node_modules \
   "$SRC_DIR/" "$APP_DIR/"
-install -m 644 "$SRC_DIR/deploy/groupware.service" "$SRC_DIR/deploy/groupware-backup.service" "$SRC_DIR/deploy/groupware-backup.timer" /etc/systemd/system/
+for u in "${UNITS[@]}"; do install -m 644 "$SRC_DIR/deploy/$u" /etc/systemd/system/; done
 systemctl daemon-reload
 
 echo "==> 3/4 再起動"
-systemctl restart groupware
+# 失敗しても止めずに起動確認へ進む（確認できなければ元の版に戻す）
+systemctl restart groupware || true
 
 echo "==> 4/4 起動確認"
 for _ in $(seq 1 20); do
@@ -36,6 +42,8 @@ done
 
 echo "起動を確認できないため、元の版に戻します" >&2
 rsync -a --delete "$PREV/" "$APP_DIR/"
+for u in "${UNITS[@]}"; do install -m 644 "$PREV_UNITS/$u" /etc/systemd/system/; done
+systemctl daemon-reload
 systemctl restart groupware
 echo "元の版に戻しました。sudo journalctl -u groupware -n 100 で原因を確認してください" >&2
 exit 1
