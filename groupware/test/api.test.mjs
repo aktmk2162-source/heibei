@@ -105,6 +105,12 @@ describe('認証', () => {
     assert.equal(r.status, 400);
   });
 
+  test('死活監視の確認口はログイン不要で ok を返す', async () => {
+    const res = await fetch(base + '/healthz');
+    assert.equal(res.status, 200);
+    assert.equal(await res.text(), 'ok');
+  });
+
   test('静的ファイルにセキュリティヘッダーが付く', async () => {
     const res = await fetch(base + '/');
     assert.equal(res.status, 200);

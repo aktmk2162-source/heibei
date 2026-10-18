@@ -1,0 +1,33 @@
+# 社内グループウェア（systemd サービス定義）
+# install-ubuntu.sh が /etc/systemd/system/groupware.service に配置します。
+[Unit]
+Description=社内グループウェア
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=groupware
+Group=groupware
+WorkingDirectory=/opt/groupware
+EnvironmentFile=/etc/groupware/groupware.env
+ExecStart=/usr/bin/node --disable-warning=ExperimentalWarning /opt/groupware/server.mjs
+Restart=always
+RestartSec=5
+# 停止時に処理中のリクエストを終えるまで待つ
+TimeoutStopSec=15
+
+# ---- 守りの設定（アプリが書き込めるのはデータとバックアップの場所だけ） ----
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/groupware /var/backups/groupware
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+
+[Install]
+WantedBy=multi-user.target

@@ -46,6 +46,8 @@ npm start
 
 ## 本番運用
 
+**社内サーバー（Ubuntu）への設置は [deploy/README.md（設置手順書）](deploy/README.md) の手順で行います。** 設置後の登録作業は [deploy/初期登録の手順.md](deploy/初期登録の手順.md)、社員への案内文は [deploy/社員向け_利用開始のご案内.md](deploy/社員向け_利用開始のご案内.md) にあります。以下は構成の概要です。
+
 ### 推奨構成（30〜100名規模）
 
 - 社内サーバーまたはクラウドの小型 VM 1台（目安: 2vCPU / 2GB メモリ / 20GB ディスク）
@@ -161,5 +163,7 @@ groupware/
     api/              機能ごとの API（users / events / polls / workflow / board / blog / chat / templates）
   public/             画面（HTML / CSS / JavaScript、通知用 Service Worker）
   scripts/backup.mjs  バックアップ
+  scripts/reset-password.mjs  緊急用のパスワード初期化
+  deploy/             社内サーバー設置用（手順書・インストール/更新スクリプト・systemd・Caddy・CSV 様式）
   test/               API テスト
 ```
